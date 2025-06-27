@@ -1,10 +1,11 @@
 import OTBiolabInterface as otb
 import OTBiolabClasses as otbClasses
 import numpy as np
-from sklearn.decomposition import FastICA
+from scipy import signal
+from scipy import fftpack
+from matplotlib import pyplot as plt
 
 ''' DESCRIPTION 
-MUAP decomposition
 '''
 
 ''' CATEGORY
@@ -18,7 +19,13 @@ ProposedMethod
 #var1=...
 #var2=...
 #var3=...
-n_components=None
+samplerate=2000
+a=48
+b=52
+c=49
+d=51
+gpass=3
+gstop=40
 
 ###################################################################################################################
 
@@ -36,14 +43,15 @@ tracks=otb.LoadDataFromPythonFolder()
 #Develope your code here
 
 #Example function for data elaboration. This example just report as output the input values
-def Example_Function(samples):
-
+def Example_Function(samples, samplerate, fp, fs, gpass, gstop):
+    fn = samplerate / 2                           #ナイキスト周波数
+    wp = fp / fn                                  #ナイキスト周波数で通過域端周波数を正規化
+    ws = fs / fn                                  #ナイキスト周波数で阻止域端周波数を正規化
+    N, Wn = signal.buttord(wp, ws, gpass, gstop)  #オーダーとバターワースの正規化周波数を計算
+    b, a = signal.butter(N, Wn, "bandstop")       #フィルタ伝達関数の分子と分母を計算
+    y = signal.filtfilt(b, a, samples)                  #信号に対してフィルタをかける
+    return y                                      #フィルタ後の信号を返す
 	
-	transformer = FastICA(n_components=n_components)
-	samples_transformed = transformer.fit_transform(samples)
-	samples_transformed.shape
-	
-	return samples_transformed
     
     
 #Main Code - Example code to show how elaborate tracks and save them. Change the elaboration with your own code
@@ -58,7 +66,7 @@ for track in tracks:
 		for channel in section.channels:
 			
 			
-			elaborated_data=Example_Function(channel.data) #channel.data contains your samples
+			elaborated_data=Example_Function(channel.data, samplerate=samplerate, fp=np.array([a,b]), fs=np.array([c,d]), gpass=gpass, gstop=gstop) #channel.data contains your samples
 			result_channels.append(otbClasses.Channel(elaborated_data))
 		
 		number_of_channels=len(result_channels)
