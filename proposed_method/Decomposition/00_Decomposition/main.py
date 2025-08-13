@@ -1,5 +1,7 @@
 import OTBiolabInterface as otb
 import OTBiolabClasses as otbClasses
+import numpy as np
+from sklearn.decomposition import FastICA
 
 ''' DESCRIPTION 
 MUAP decomposition
@@ -16,6 +18,7 @@ ProposedMethod
 #var1=...
 #var2=...
 #var3=...
+n_components=None
 
 ###################################################################################################################
 
@@ -34,10 +37,13 @@ tracks=otb.LoadDataFromPythonFolder()
 
 #Example function for data elaboration. This example just report as output the input values
 def Example_Function(samples):
+
 	
-    #Samples elaboration
+	transformer = FastICA(n_components=n_components)
+	samples_transformed = transformer.fit_transform(samples)
+	samples_transformed.shape
 	
-    return samples
+	return samples_transformed
     
     
 #Main Code - Example code to show how elaborate tracks and save them. Change the elaboration with your own code
