@@ -675,6 +675,86 @@ def indices_to_labels(
                 labels[i] = c
     return labels
 
+# xmeansクラスタリング
+def xmeans_clustering(features, kmax=5):
+    # 1. 特徴ベクトルを構築
+    features = np.array(features)
+    results_df = pd.DataFrame(data=features, columns=['center_x', 'center_y', 'theta_deg'])
+
+    # --- 第1段階：中心座標でクラスタリング ---
+    # 特徴量：
+    center_features = results_df[['center_x', 'center_y']].dropna()
+    # ----- X-meansクラスタリング -----
+    initial_centers = kmeans_plusplus_initializer(center_features, 2).initialize()
+    xmeans_instance = xmeans(
+        data=center_features,
+        initial_centers=initial_centers,
+        kmax=kmax,  # 最大クラスタ数（必要に応じて調整）
+        ccore=True,
+        metric=distance_metric(type_metric.EUCLIDEAN)
+    )
+    xmeans_instance.process()
+
+    clusters = xmeans_instance.get_clusters()
+    centers = np.array(xmeans_instance.get_centers())
+    num_clusters = len(clusters)
+    center_labels = indices_to_labels(clusters)
+
+    # 結果に追加
+    results_df['center_cluster'] = -1
+    results_df.loc[center_features.index, 'center_cluster'] = center_labels
+
+    direction_cluster_labels = np.full(len(results_df), -1)  # 初期化
+
+    for group_id in range(num_clusters):
+        group_df = results_df[results_df['center_cluster'] == group_id]
+        idx = group_df.index
+        dir_features = group_df[['theta_deg']].values
+        initial_centers = kmeans_plusplus_initializer(dir_features, 2).initialize()
+        xmeans_instance = xmeans(
+            data=dir_features,
+            initial_centers=initial_centers,
+            kmax=kmax,  # 最大クラスタ数（必要に応じて調整）
+            ccore=True,
+            metric=distance_metric(type_metric.EUCLIDEAN)
+        )
+        xmeans_instance.process()
+
+        clusters = xmeans_instance.get_clusters()
+        centers = np.array(xmeans_instance.get_centers())
+        num_clusters = len(clusters)
+        sub_labels = np.array(indices_to_labels(clusters))
+        direction_cluster_labels[idx] = sub_labels + group_id * 10  # 固有ラベル化
+
+    # 結果に追加
+    results_df['direction_cluster'] = direction_cluster_labels
+
+    # クラスタごとに平均・標準偏差を集計
+    cluster_stats = results_df.groupby('direction_cluster').agg({
+        'center_x': ['mean', 'std'],
+        'center_y': ['mean', 'std'],
+        'theta_deg': ['mean', 'std'],
+        'direction_cluster': 'count'
+    })
+
+    # 結果をまとめ直す
+    summary_df = pd.DataFrame({
+        'cluster': cluster_stats.index,
+        'center_x_mean': cluster_stats[('center_x', 'mean')],
+        'center_x_std': cluster_stats[('center_x', 'std')],
+        'center_y_mean': cluster_stats[('center_y', 'mean')],
+        'center_y_std': cluster_stats[('center_y', 'std')],
+        'theta_deg_mean': cluster_stats[('theta_deg', 'mean')],
+        'theta_deg_std': cluster_stats[('theta_deg', 'std')],
+        # 'count': results_df['cluster'].value_counts().sort_index(),
+        'count': cluster_stats[('direction_cluster', 'count')]
+    }).reset_index(drop=True)
+
+    # 結果表示
+    summary_df
+
+    return results_df, summary_df
+
 # normalizeを使ったxmeansクラスタリング
 def normalized_xmeans_clustering(features, kmax=5):
     # 1. 特徴ベクトルを構築
@@ -742,6 +822,67 @@ def run_hdbscan(X, min_cluster_size=10, min_samples=None):
     labels = clus.fit_predict(X)
     n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
     return {'labels': labels, 'n_clusters': int(n_clusters), 'probabilities': clus.probabilities_}
+
+# hdbscanクラスタリング
+def hdbscan_clustering(features, min_cluster_size=10, min_samples=None):
+    # 1. 特徴ベクトルを構築
+    features = np.array(features)
+    results_df = pd.DataFrame(data=features, columns=['center_x', 'center_y', 'theta_deg'])
+
+    # --- 第1段階：中心座標でクラスタリング ---
+    # 特徴量：
+    center_features = results_df[['center_x', 'center_y']].dropna()
+    # ----- hdbscan -----
+    results = run_hdbscan(center_features, min_cluster_size=min_cluster_size, min_samples=min_samples)
+    center_labels = results['labels']
+    n_clusters = results['n_clusters']
+
+    # 結果に追加
+    results_df['center_cluster'] = -1
+    results_df.loc[center_features.index, 'center_cluster'] = center_labels
+    results_df = results_df[results_df['center_cluster'] != -1].reset_index(drop=True)
+
+    direction_cluster_labels = np.full(len(results_df), -1)  # 初期化
+
+    for group_id in range(n_clusters):
+        group_df = results_df[results_df['center_cluster'] == group_id]
+        idx = group_df.index
+        dir_features = group_df[['theta_deg']].values
+        results = run_hdbscan(dir_features, min_cluster_size=min_cluster_size, min_samples=min_samples)
+        sub_labels = results['labels']
+        for i, sub_label in zip(idx, sub_labels):
+            if sub_label != -1:
+                direction_cluster_labels[i] = sub_label + group_id * 10  # 固有ラベル化
+
+    # 結果に追加
+    results_df['direction_cluster'] = direction_cluster_labels
+    results_df = results_df[results_df['direction_cluster'] != -1].reset_index(drop=True)
+
+    # クラスタごとに平均・標準偏差を集計
+    cluster_stats = results_df.groupby('direction_cluster').agg({
+        'center_x': ['mean', 'std'],
+        'center_y': ['mean', 'std'],
+        'theta_deg': ['mean', 'std'],
+        'direction_cluster': 'count'
+    })
+
+    # 結果をまとめ直す
+    summary_df = pd.DataFrame({
+        'cluster': cluster_stats.index,
+        'center_x_mean': cluster_stats[('center_x', 'mean')],
+        'center_x_std': cluster_stats[('center_x', 'std')],
+        'center_y_mean': cluster_stats[('center_y', 'mean')],
+        'center_y_std': cluster_stats[('center_y', 'std')],
+        'theta_deg_mean': cluster_stats[('theta_deg', 'mean')],
+        'theta_deg_std': cluster_stats[('theta_deg', 'std')],
+        # 'count': results_df['cluster'].value_counts().sort_index(),
+        'count': cluster_stats[('direction_cluster', 'count')]
+    }).reset_index(drop=True)
+
+    # 結果表示
+    summary_df
+
+    return results_df, summary_df
 
 # normalizeを使ったhdbscanクラスタリング
 def normalized_hdbscan_clustering(features, min_cluster_size=10, min_samples=None):
@@ -914,9 +1055,19 @@ if __name__ == "__main__":
     n_subjects = 1 #20
     n_sessions = 2
 
-    mucle_activity_informations_kmeans = []
-    mucle_activity_informations_normalized_kmeans = []
+    mucle_activity_informations_kmeans32 = []
+    mucle_activity_informations_kmeans42 = []
+    mucle_activity_informations_kmeans43 = []
+    mucle_activity_informations_kmeans52 = []
+    mucle_activity_informations_kmeans53 = []
+    mucle_activity_informations_kmeans54 = []
+    mucle_activity_informations_normalized_kmeans2 = []
+    mucle_activity_informations_normalized_kmeans3 = []
+    mucle_activity_informations_normalized_kmeans4 = []
+    mucle_activity_informations_normalized_kmeans5 = []
+    mucle_activity_informations_xmeans = []
     mucle_activity_informations_normalized_xmeans = []
+    mucle_activity_informations_hdbscan = []
     mucle_activity_informations_normalized_hdbscan = []
     for i in range(n_subjects):
         for j in range(n_sessions):
@@ -957,32 +1108,90 @@ if __name__ == "__main__":
                             if preprosess:
                                 emg_data = butter_bandpass_filter(emg_data, fs=2048, low_hz=20.0, high_hz=400.0, order=4)
                             features = gmm(emg_data, gaussian_2d, ptp, fs=2048, window_ms=25, threshold=0, percent=95, max_components=4, criterion='bic', upsample_factor=5, func_type=False)
-                            # kmeansクラスタリング
+                            # 32kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=3, k2=2)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 42kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=4, k2=2)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 43kmeansクラスタリング
                             results_df, summary_df = kmeans_clustering(features, k1=4, k2=3)
                             virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_kmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # normalized_kmeansクラスタリング
+                            mucle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 52kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=5, k2=2)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 53kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=5, k2=3)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 54kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=5, k2=4)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 2normalized_kmeansクラスタリング
+                            results_df, summary_df = normalized_kmeans_clustering(features, k1=2)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 3normalized_kmeansクラスタリング
+                            results_df, summary_df = normalized_kmeans_clustering(features, k1=3)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 4normalized_kmeansクラスタリング
+                            results_df, summary_df = normalized_kmeans_clustering(features, k1=4)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 5normalized_kmeansクラスタリング
                             results_df, summary_df = normalized_kmeans_clustering(features, k1=5)
                             virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_normalized_kmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            mucle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # xmeansクラスタリング
+                            results_df, summary_df = xmeans_clustering(features, kmax=5)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
                             # normalized_xmeansクラスタリング
                             results_df, summary_df = normalized_xmeans_clustering(features, kmax=5)
                             virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
                             mucle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
                             # hdbscanクラスタリング
+                            results_df, summary_df = hdbscan_clustering(features, min_cluster_size=10)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            mucle_activity_informations_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # normalized_hdbscanクラスタリング
                             results_df, summary_df = normalized_hdbscan_clustering(features, min_cluster_size=10)
                             virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
                             mucle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
                         except RuntimeError:
-                            mucle_activity_informations_kmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_normalized_kmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            mucle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
                             mucle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
                             mucle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
                 except FileNotFoundError:
                     pass
 
     # csvファイルに保存
-    save_records_to_csv(mucle_activity_informations_kmeans, out_path='output/test2_gmm_kmeans.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans, out_path='output/test2_gmm_normalized_kmeans.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test2_gmm_normalized_xmeans.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test2_gmm_normalized_hdbscan.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans32, out_path='output/test3_gmm_kmeans32.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans42, out_path='output/test3_gmm_kmeans42.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans43, out_path='output/test3_gmm_kmeans43.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans52, out_path='output/test3_gmm_kmeans52.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans53, out_path='output/test3_gmm_kmeans53.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans54, out_path='output/test3_gmm_kmeans54.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans2, out_path='output/test3_gmm_normalized_kmeans2.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans3, out_path='output/test3_gmm_normalized_kmeans3.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans4, out_path='output/test3_gmm_normalized_kmeans4.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans5, out_path='output/test3_gmm_normalized_kmeans5.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_gmm_xmeans.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_gmm_normalized_xmeans.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_gmm_hdbscan.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_gmm_normalized_hdbscan.csv')
