@@ -1111,7 +1111,7 @@ if __name__ == "__main__":
                             emg_data = electrode_place[0]
                             if preprosess:
                                 emg_data = butter_bandpass_filter(emg_data, fs=2048, low_hz=20.0, high_hz=400.0, order=4)
-                            features = gmm(emg_data, gaussian_2d, ptp, fs=2048, window_ms=25, threshold=0, percent=95, max_components=4, criterion='bic', upsample_factor=5, func_type=False)
+                            features = gaussian_fitting(emg_data, gaussian_2d, spectral_entropy, fs=2048, window_ms=25, threshold=0, func_type=True)
                             # 32kmeansクラスタリング
                             results_df, summary_df = kmeans_clustering(features, k1=3, k2=2)
                             virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
@@ -1185,17 +1185,17 @@ if __name__ == "__main__":
                     pass
 
     # csvファイルに保存
-    save_records_to_csv(mucle_activity_informations_kmeans32, out_path='output/test3_ptp_gmm_kmeans32.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans42, out_path='output/test3_ptp_gmm_kmeans42.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans43, out_path='output/test3_ptp_gmm_kmeans43.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans52, out_path='output/test3_ptp_gmm_kmeans52.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans53, out_path='output/test3_ptp_gmm_kmeans53.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans54, out_path='output/test3_ptp_gmm_kmeans54.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans2, out_path='output/test3_ptp_gmm_normalized_kmeans2.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans3, out_path='output/test3_ptp_gmm_normalized_kmeans3.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans4, out_path='output/test3_ptp_gmm_normalized_kmeans4.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans5, out_path='output/test3_ptp_gmm_normalized_kmeans5.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gmm_xmeans.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gmm_normalized_xmeans.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gmm_hdbscan.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gmm_normalized_hdbscan.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans32, out_path='output/test3_spectralentropy_gaussianfitting_kmeans32.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans42, out_path='output/test3_spectralentropy_gaussianfitting_kmeans42.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans43, out_path='output/test3_spectralentropy_gaussianfitting_kmeans43.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans52, out_path='output/test3_spectralentropy_gaussianfitting_kmeans52.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans53, out_path='output/test3_spectralentropy_gaussianfitting_kmeans53.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans54, out_path='output/test3_spectralentropy_gaussianfitting_kmeans54.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans2, out_path='output/test3_spectralentropy_gaussianfitting_normalized_kmeans2.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans3, out_path='output/test3_spectralentropy_gaussianfitting_normalized_kmeans3.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans4, out_path='output/test3_spectralentropy_gaussianfitting_normalized_kmeans4.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans5, out_path='output/test3_spectralentropy_gaussianfitting_normalized_kmeans5.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_spectralentropy_gaussianfitting_xmeans.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_spectralentropy_gaussianfitting_normalized_xmeans.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_spectralentropy_gaussianfitting_hdbscan.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_spectralentropy_gaussianfitting_normalized_hdbscan.csv')

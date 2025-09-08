@@ -553,6 +553,7 @@ def kmeans_clustering(features, k1=4, k2=3):
 
     # 結果に追加
     results_df['direction_cluster'] = direction_cluster_labels
+    results_df = results_df[results_df['direction_cluster'] != -1].reset_index(drop=True)
 
 
     # クラスタごとに平均・標準偏差を集計
@@ -708,26 +709,28 @@ def xmeans_clustering(features, kmax=5):
 
     for group_id in range(num_clusters):
         group_df = results_df[results_df['center_cluster'] == group_id]
-        idx = group_df.index
-        dir_features = group_df[['theta_deg']].values
-        initial_centers = kmeans_plusplus_initializer(dir_features, 2).initialize()
-        xmeans_instance = xmeans(
-            data=dir_features,
-            initial_centers=initial_centers,
-            kmax=kmax,  # 最大クラスタ数（必要に応じて調整）
-            ccore=True,
-            metric=distance_metric(type_metric.EUCLIDEAN)
-        )
-        xmeans_instance.process()
+        if len(group_df) >= 2:
+            idx = group_df.index
+            dir_features = group_df[['theta_deg']].values
+            initial_centers = kmeans_plusplus_initializer(dir_features, 2).initialize()
+            xmeans_instance = xmeans(
+                data=dir_features,
+                initial_centers=initial_centers,
+                kmax=kmax,  # 最大クラスタ数（必要に応じて調整）
+                ccore=True,
+                metric=distance_metric(type_metric.EUCLIDEAN)
+            )
+            xmeans_instance.process()
 
-        clusters = xmeans_instance.get_clusters()
-        centers = np.array(xmeans_instance.get_centers())
-        num_clusters = len(clusters)
-        sub_labels = np.array(indices_to_labels(clusters))
-        direction_cluster_labels[idx] = sub_labels + group_id * 10  # 固有ラベル化
+            clusters = xmeans_instance.get_clusters()
+            centers = np.array(xmeans_instance.get_centers())
+            num_clusters = len(clusters)
+            sub_labels = np.array(indices_to_labels(clusters))
+            direction_cluster_labels[idx] = sub_labels + group_id * 10  # 固有ラベル化
 
     # 結果に追加
     results_df['direction_cluster'] = direction_cluster_labels
+    results_df = results_df[results_df['direction_cluster'] != -1].reset_index(drop=True)
 
     # クラスタごとに平均・標準偏差を集計
     cluster_stats = results_df.groupby('direction_cluster').agg({
@@ -846,13 +849,14 @@ def hdbscan_clustering(features, min_cluster_size=10, min_samples=None):
 
     for group_id in range(n_clusters):
         group_df = results_df[results_df['center_cluster'] == group_id]
-        idx = group_df.index
-        dir_features = group_df[['theta_deg']].values
-        results = run_hdbscan(dir_features, min_cluster_size=min_cluster_size, min_samples=min_samples)
-        sub_labels = results['labels']
-        for i, sub_label in zip(idx, sub_labels):
-            if sub_label != -1:
-                direction_cluster_labels[i] = sub_label + group_id * 10  # 固有ラベル化
+        if len(group_df) >= min_cluster_size:
+            idx = group_df.index
+            dir_features = group_df[['theta_deg']].values
+            results = run_hdbscan(dir_features, min_cluster_size=min_cluster_size, min_samples=min_samples)
+            sub_labels = results['labels']
+            for i, sub_label in zip(idx, sub_labels):
+                if sub_label != -1:
+                    direction_cluster_labels[i] = sub_label + group_id * 10  # 固有ラベル化
 
     # 結果に追加
     results_df['direction_cluster'] = direction_cluster_labels
@@ -1052,7 +1056,7 @@ def save_records_to_csv(records, out_path, fields=FIELDS):
 if __name__ == "__main__":
     # 分析
     preprosess = False #前処理を行うかどうか
-    n_subjects = 1 #20
+    n_subjects = 5 #20
     n_sessions = 2
 
     mucle_activity_informations_kmeans32 = []
@@ -1078,7 +1082,7 @@ if __name__ == "__main__":
                 lines.append(l.strip())
             gestures.close()
             gesture = 0
-            for k, line in enumerate(lines[:2]): #for k, line in enumerate(lines):
+            for k, line in enumerate(lines): #for k, line in enumerate(lines):
                 if gesture == line:
                     trial = 2
                 else:
@@ -1181,17 +1185,17 @@ if __name__ == "__main__":
                     pass
 
     # csvファイルに保存
-    save_records_to_csv(mucle_activity_informations_kmeans32, out_path='output/test3_gaussianfitting_kmeans32.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans42, out_path='output/test3_gaussianfitting_kmeans42.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans43, out_path='output/test3_gaussianfitting_kmeans43.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans52, out_path='output/test3_gaussianfitting_kmeans52.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans53, out_path='output/test3_gaussianfitting_kmeans53.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans54, out_path='output/test3_gaussianfitting_kmeans54.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans2, out_path='output/test3_gaussianfitting_normalized_kmeans2.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans3, out_path='output/test3_gaussianfitting_normalized_kmeans3.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans4, out_path='output/test3_gaussianfitting_normalized_kmeans4.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans5, out_path='output/test3_gaussianfitting_normalized_kmeans5.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_gaussianfitting_xmeans.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_gaussianfitting_normalized_xmeans.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_gaussianfitting_hdbscan.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_gaussianfitting_normalized_hdbscan.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans32, out_path='output/test3_ptp_gaussianfitting_kmeans32.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans42, out_path='output/test3_ptp_gaussianfitting_kmeans42.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans43, out_path='output/test3_ptp_gaussianfitting_kmeans43.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans52, out_path='output/test3_ptp_gaussianfitting_kmeans52.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans53, out_path='output/test3_ptp_gaussianfitting_kmeans53.csv')
+    save_records_to_csv(mucle_activity_informations_kmeans54, out_path='output/test3_ptp_gaussianfitting_kmeans54.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans2, out_path='output/test3_ptp_gaussianfitting_normalized_kmeans2.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans3, out_path='output/test3_ptp_gaussianfitting_normalized_kmeans3.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans4, out_path='output/test3_ptp_gaussianfitting_normalized_kmeans4.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_kmeans5, out_path='output/test3_ptp_gaussianfitting_normalized_kmeans5.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gaussianfitting_xmeans.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gaussianfitting_normalized_xmeans.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gaussianfitting_hdbscan.csv')
+    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gaussianfitting_normalized_hdbscan.csv')
