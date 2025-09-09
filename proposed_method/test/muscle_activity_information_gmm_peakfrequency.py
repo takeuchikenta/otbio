@@ -1000,202 +1000,565 @@ def get_virtual_bipolars(results_df, ied=2, arrow_scale=0.5, show_plot=True):
   return virtual_bipolars, labels, center_direction, len(n_virtual_bipolars_checker)
 
 
-# csvファイル保存用の関数
-FIELDS = [
-    'file_name', 'gesture', 'trial', 'subject', 'session',
-    'electrode_place', 'emg_data', 'virtual_bipolars',
-    'labels', 'center_direction', 'n_virtual_bipolars'
-]
+# # csvファイル保存用の関数
+# FIELDS = [
+#     'file_name', 'gesture', 'trial', 'subject', 'session',
+#     'electrode_place', 'emg_data', 'virtual_bipolars',
+#     'labels', 'center_direction', 'n_virtual_bipolars'
+# ]
 
-def _to_jsonable(x):
-    """CSVに入れる前段階としてJSON化可能な素に変換（NumPy対応）。"""
-    if isinstance(x, np.ndarray):
-        return x.tolist()
-    if isinstance(x, (np.integer, np.floating, np.bool_)):
-        return x.item()
-    if isinstance(x, Mapping):
-        return {k: _to_jsonable(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [_to_jsonable(v) for v in x]
-    return x  # 文字列/数値/None などはそのまま
+# def _to_jsonable(x):
+#     """CSVに入れる前段階としてJSON化可能な素に変換（NumPy対応）。"""
+#     if isinstance(x, np.ndarray):
+#         return x.tolist()
+#     if isinstance(x, (np.integer, np.floating, np.bool_)):
+#         return x.item()
+#     if isinstance(x, Mapping):
+#         return {k: _to_jsonable(v) for k, v in x.items()}
+#     if isinstance(x, (list, tuple)):
+#         return [_to_jsonable(v) for v in x]
+#     return x  # 文字列/数値/None などはそのまま
 
-def _serialize_for_csv(x):
-    """リスト/辞書/タプルはJSON文字列に、その他はそのまま返す。"""
-    x = _to_jsonable(x)
-    if isinstance(x, (list, dict, tuple)):
-        return json.dumps(x, ensure_ascii=False, separators=(',', ':'))
-    return x
+# def _serialize_for_csv(x):
+#     """リスト/辞書/タプルはJSON文字列に、その他はそのまま返す。"""
+#     x = _to_jsonable(x)
+#     if isinstance(x, (list, dict, tuple)):
+#         return json.dumps(x, ensure_ascii=False, separators=(',', ':'))
+#     return x
 
-def save_records_to_csv(records, out_path, fields=FIELDS):
-    """
-    records: 上記フォーマットの辞書のリスト
-    out_path: 保存パス（例: 'output/records.csv'）
-    fields: 列順（recordsに無いキーは空欄、余分なキーは末尾に追加）
-    """
+# def save_records_to_csv(records, out_path, fields=FIELDS):
+#     """
+#     records: 上記フォーマットの辞書のリスト
+#     out_path: 保存パス（例: 'output/records.csv'）
+#     fields: 列順（recordsに無いキーは空欄、余分なキーは末尾に追加）
+#     """
+#     rows = []
+#     for rec in records:
+#         row = {k: _serialize_for_csv(rec.get(k, None)) for k in rec.keys()}
+#         # 列順を固定したい場合に欠損キーを補完
+#         for k in fields:
+#             if k not in row:
+#                 row[k] = None
+#         rows.append(row)
+
+#     # 列順をfields優先に（未知のキーがあれば後ろに付ける）
+#     extra_cols = [c for c in rows[0].keys() if c not in fields] if rows else []
+#     columns = list(fields) + extra_cols
+
+#     df = pd.DataFrame(rows, columns=columns)
+#     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+#     df.to_csv(out_path, index=False, encoding='utf-8-sig')
+#     return out_path
+
+# 標準化・正規化
+def scaler(vpolars):
+    x_list = []
+    y_list = []
+    theta_list = []
+    for vpolar_list in vpolars:
+        for vpolar in vpolar_list['center_direction']:
+            x_list.append(vpolar[0])
+            y_list.append(vpolar[1])
+            theta_list.append(vpolar[2])
+            # print(f"x: {vpolar[0]}, y: {vpolar[1]}, θ: {vpolar[2]}")
+    # 標準化
+    x_mean = np.mean(x_list)
+    y_mean = np.mean(y_list)
+    theta_mean = np.mean(theta_list)
+    x_std = np.std(x_list)
+    y_std = np.std(y_list)
+    theta_std = np.std(theta_list)
+    # 正規化
+    x_max = np.max(x_list)
+    x_min = np.min(x_list)
+    y_max = np.max(y_list)
+    y_min = np.min(y_list)
+    theta_max = np.max(theta_list)
+    theta_min = np.min(theta_list)
+    return x_mean, y_mean, theta_mean, x_std, y_std, theta_std, x_max, x_min, y_max, y_min, theta_max, theta_min
+
+def distances_across_sessions(vpolars, x_std, y_std, theta_std, x_max, x_min, y_max, y_min, theta_max, theta_min, scaling=2):
+    distances = []
+    for list_session1 in vpolars:
+        for list_session2 in vpolars:
+            if list_session1['subject'] == list_session2['subject'] and list_session1['session'] == 1 and list_session2['session'] == 2 and list_session1['gesture'] == list_session2['gesture'] and list_session1['trial'] == list_session2['trial'] and list_session1['electrode_place'] == list_session2['electrode_place']:
+                # print(f'file_name: {list_session1["file_name"]}, gesture: {list_session1["gesture"]}, trial: {list_session1["trial"]}, subject: {list_session1["subject"]}, session: {list_session1["session"]}')
+                # print(f'file_name: {list_session2["file_name"]}, gesture: {list_session2["gesture"]}, trial: {list_session2["trial"]}, subject: {list_session2["subject"]}, session: {list_session2["session"]}')
+                x_distance = {}
+                y_distance = {}
+                theta_distance = {}
+                result_distance = []
+                if list_session1['n_virtual_bipolars'] > 0 and list_session2['n_virtual_bipolars'] > 0:
+                    for i in range(len(list_session1['center_direction'])):
+                        x_distance[i] = []
+                        y_distance[i] = []
+                        theta_distance[i] = []
+                        for j in range(len(list_session2['center_direction'])):
+                            x_distance[i].append(list_session2['center_direction'][j][0] - list_session1['center_direction'][i][0])
+                            y_distance[i].append(list_session2['center_direction'][j][1] - list_session1['center_direction'][i][1])
+                            theta_distance[i].append(list_session2['center_direction'][j][2] - list_session1['center_direction'][i][2])
+                        # print(f'j={j},x_distance[{i}]: {x_distance[i]}, y_distance[{i}]: {y_distance[i]}, theta_distance[{i}]: {theta_distance[i]}')
+                        if scaling == 0:
+                            xy_distance = np.sqrt(np.array(x_distance[i])**2 + np.array(y_distance[i])**2)
+                        elif scaling == 1:
+                            # 標準化
+                            x_norm = np.array(x_distance[i]) / x_std
+                            y_norm = np.array(y_distance[i]) / y_std
+                            theta_norm = np.array(theta_distance[i]) / theta_std
+                            xy_distance = np.sqrt(x_norm**2 + y_norm**2 + theta_norm**2) # θの距離も考慮
+                        elif scaling == 2:
+                            # min-max正規化
+                            x_norm = np.array(x_distance[i]) / (x_max - x_min)
+                            y_norm = np.array(y_distance[i]) / (y_max - y_min)
+                            theta_norm = np.array(theta_distance[i]) / (theta_max - theta_min)
+                            xy_distance = np.sqrt(x_norm**2 + y_norm**2 + theta_norm**2) # θの距離も考慮
+                        session2_id = np.argmin(xy_distance) #最小値のインデックス
+                        result_distance.append({
+                            'session1_cluster': list_session1['labels'][i],
+                            'session2_cluster': list_session2['labels'][session2_id],
+                            'x_distance': x_distance[i][session2_id],
+                            'y_distance': y_distance[i][session2_id],
+                            'theta_distance': theta_distance[i][session2_id]
+                        })
+                        # print(f"subject={list_session1['subject']}, gesture={list_session1['gesture']}, trial={list_session1['trial']}, electrode_place={list_session1['electrode_place']},session1_id={i}, session2_id={session2_id}: session1_cluster={list_session1['labels'][i]}, session2_cluster={list_session2['labels'][session2_id]},x_distance={x_distance[i][session2_id]}, y_distance={y_distance[i][session2_id]}, theta_distance={theta_distance[i][session2_id]}")
+                else:
+                    result_distance.append(None)
+                distances.append({'subject': list_session1['subject'], 'gesture': list_session1['gesture'], 'trial': list_session1['trial'], 'electrode_place': list_session1['electrode_place'], 'result_distance': result_distance})
+    return distances
+
+def distances_across_trials(vpolars, x_std, y_std, theta_std, x_max, x_min, y_max, y_min, theta_max, theta_min, scaling=2):
+    distances_between_trials = []
+    for list_1 in vpolars:
+        for list_2 in vpolars:
+            if list_1['subject'] == list_2['subject'] and list_1['session'] == list_2['session']  and list_1['gesture'] == list_2['gesture'] and list_1['trial'] == 1 and list_2['trial'] == 2 and list_1['electrode_place'] == list_2['electrode_place']:
+                # print(f'file_name: {list_1["file_name"]}, gesture: {list_1["gesture"]}, trial: {list_1["trial"]}, subject: {list_1["subject"]}, session: {list_1["session"]}')
+                # print(f'file_name: {list_2["file_name"]}, gesture: {list_2["gesture"]}, trial: {list_2["trial"]}, subject: {list_2["subject"]}, session: {list_2["session"]}')
+                x_distance = {}
+                y_distance = {}
+                theta_distance = {}
+                result_distance = []
+                if list_1['n_virtual_bipolars'] > 0 and list_2['n_virtual_bipolars'] > 0:
+                    for i in range(len(list_1['center_direction'])):
+                        x_distance[i] = []
+                        y_distance[i] = []
+                        theta_distance[i] = []
+                        for j in range(len(list_2['center_direction'])):
+                            x_distance[i].append(list_2['center_direction'][j][0] - list_1['center_direction'][i][0])
+                            y_distance[i].append(list_2['center_direction'][j][1] - list_1['center_direction'][i][1])
+                            theta_distance[i].append(list_2['center_direction'][j][2] - list_1['center_direction'][i][2])
+                        # print(f'j={j},x_distance[{i}]: {x_distance[i]}, y_distance[{i}]: {y_distance[i]}, theta_distance[{i}]: {theta_distance[i]}')
+                        if scaling == 0:
+                            xy_distance = np.sqrt(np.array(x_distance[i])**2 + np.array(y_distance[i])**2)
+                        elif scaling == 1:
+                            # 標準化
+                            x_norm = np.array(x_distance[i]) / x_std
+                            y_norm = np.array(y_distance[i]) / y_std
+                            theta_norm = np.array(theta_distance[i]) / theta_std
+                            xy_distance = np.sqrt(x_norm**2 + y_norm**2 + theta_norm**2) # θの距離も考慮
+                        elif scaling == 2:
+                            # min-max正規化
+                            x_norm = np.array(x_distance[i]) / (x_max - x_min)
+                            y_norm = np.array(y_distance[i]) / (y_max - y_min)
+                            theta_norm = np.array(theta_distance[i]) / (theta_max - theta_min)
+                            xy_distance = np.sqrt(x_norm**2 + y_norm**2 + theta_norm**2) # θの距離も考慮
+                        session2_id = np.argmin(xy_distance) #最小値のインデックス
+                        result_distance.append({
+                            'session1_cluster': list_1['labels'][i],
+                            'session2_cluster': list_2['labels'][session2_id],
+                            'x_distance': x_distance[i][session2_id],
+                            'y_distance': y_distance[i][session2_id],
+                            'theta_distance': theta_distance[i][session2_id]
+                        })
+                        # print(f"subject={list_1['subject']}, gesture={list_1['gesture']}, trial={list_1['trial']}, electrode_place={list_1['electrode_place']},session1_id={i}, session2_id={session2_id}: session1_cluster={list_1['labels'][i]}, session2_cluster={list_2['labels'][session2_id]},x_distance={x_distance[i][session2_id]}, y_distance={y_distance[i][session2_id]}, theta_distance={theta_distance[i][session2_id]}")
+                else:
+                    result_distance.append(None)
+                distances_between_trials.append({'subject': list_1['subject'], 'gesture': list_1['gesture'], 'session': list_1['session'], 'electrode_place': list_1['electrode_place'], 'result_distance': result_distance})
+    return distances_between_trials
+
+def distances_across_sessions_and_trials(vpolars, x_std, y_std, theta_std, x_max, x_min, y_max, y_min, theta_max, theta_min, scaling=2):
+    distances_across_session_trials = []
+    for list_1 in vpolars:
+        for list_2 in vpolars:
+            if list_1['subject'] == list_2['subject'] and list_1['session'] == 1 and list_2['session'] == 2  and list_1['gesture'] == list_2['gesture'] and list_1['trial'] != list_2['trial'] and list_1['electrode_place'] == list_2['electrode_place']:
+                # print(f'file_name: {list_1["file_name"]}, gesture: {list_1["gesture"]}, trial: {list_1["trial"]}, subject: {list_1["subject"]}, session: {list_1["session"]}')
+                # print(f'file_name: {list_2["file_name"]}, gesture: {list_2["gesture"]}, trial: {list_2["trial"]}, subject: {list_2["subject"]}, session: {list_2["session"]}')
+                x_distance = {}
+                y_distance = {}
+                theta_distance = {}
+                result_distance = []
+                if list_1['n_virtual_bipolars'] > 0 and list_2['n_virtual_bipolars'] > 0:
+                    for i in range(len(list_1['center_direction'])):
+                        x_distance[i] = []
+                        y_distance[i] = []
+                        theta_distance[i] = []
+                        for j in range(len(list_2['center_direction'])):
+                            x_distance[i].append(list_2['center_direction'][j][0] - list_1['center_direction'][i][0])
+                            y_distance[i].append(list_2['center_direction'][j][1] - list_1['center_direction'][i][1])
+                            theta_distance[i].append(list_2['center_direction'][j][2] - list_1['center_direction'][i][2])
+                        # print(f'j={j},x_distance[{i}]: {x_distance[i]}, y_distance[{i}]: {y_distance[i]}, theta_distance[{i}]: {theta_distance[i]}')
+                        if scaling == 0:
+                            xy_distance = np.sqrt(np.array(x_distance[i])**2 + np.array(y_distance[i])**2)
+                        elif scaling == 1:
+                            # 標準化
+                            x_norm = np.array(x_distance[i]) / x_std
+                            y_norm = np.array(y_distance[i]) / y_std
+                            theta_norm = np.array(theta_distance[i]) / theta_std
+                            xy_distance = np.sqrt(x_norm**2 + y_norm**2 + theta_norm**2) # θの距離も考慮
+                        elif scaling == 2:
+                            # min-max正規化
+                            x_norm = np.array(x_distance[i]) / (x_max - x_min)
+                            y_norm = np.array(y_distance[i]) / (y_max - y_min)
+                            theta_norm = np.array(theta_distance[i]) / (theta_max - theta_min)
+                            xy_distance = np.sqrt(x_norm**2 + y_norm**2 + theta_norm**2) # θの距離も考慮
+                        session2_id = np.argmin(xy_distance) #最小値のインデックス
+                        result_distance.append({
+                            'session1_cluster': list_1['labels'][i],
+                            'session2_cluster': list_2['labels'][session2_id],
+                            'x_distance': x_distance[i][session2_id],
+                            'y_distance': y_distance[i][session2_id],
+                            'theta_distance': theta_distance[i][session2_id]
+                        })
+                        # print(f"subject={list_1['subject']}, gesture={list_1['gesture']}, trial={list_1['trial']}, electrode_place={list_1['electrode_place']},session1_id={i}, session2_id={session2_id}: session1_cluster={list_1['labels'][i]}, session2_cluster={list_2['labels'][session2_id]},x_distance={x_distance[i][session2_id]}, y_distance={y_distance[i][session2_id]}, theta_distance={theta_distance[i][session2_id]}")
+                else:
+                    result_distance.append(None)
+                distances_across_session_trials.append({'subject': list_1['subject'], 'gesture': list_1['gesture'], 'session': list_1['session'], 'electrode_place': list_1['electrode_place'], 'result_distance': result_distance})
+    return distances_across_session_trials
+
+def df_maker(distances):
+    n_sessions_list = []
+    for distance in distances:
+        n_sessions_list.append(distance['subject'])
+    subjects = set(n_sessions_list)
+
+    x_ED_gesture = {}
+    y_ED_gesture = {}
+    theta_ED_gesture = {}
+    x_EP_gesture = {}
+    y_EP_gesture = {}
+    theta_EP_gesture = {}
+    x_FD_gesture = {}
+    y_FD_gesture = {}
+    theta_FD_gesture = {}
+    x_FP_gesture = {}
+    y_FP_gesture = {}
+    theta_FP_gesture = {}
+    n_gestures = 34
+    for subject in subjects:
+        x_ED_gesture[subject] = {}
+        y_ED_gesture[subject] = {}
+        theta_ED_gesture[subject] = {}
+        x_EP_gesture[subject] = {}
+        y_EP_gesture[subject] = {}
+        theta_EP_gesture[subject] = {}
+        x_FD_gesture[subject] = {}
+        y_FD_gesture[subject] = {}
+        theta_FD_gesture[subject] = {}
+        x_FP_gesture[subject] = {}
+        y_FP_gesture[subject] = {}
+        theta_FP_gesture[subject] = {}
+        for i in range(n_gestures):
+            x_ED_gesture[subject][i+1] = []
+            y_ED_gesture[subject][i+1] = []
+            theta_ED_gesture[subject][i+1] = []
+            x_EP_gesture[subject][i+1] = []
+            y_EP_gesture[subject][i+1] = []
+            theta_EP_gesture[subject][i+1] = []
+            x_FD_gesture[subject][i+1] = []
+            y_FD_gesture[subject][i+1] = []
+            theta_FD_gesture[subject][i+1] = []
+            x_FP_gesture[subject][i+1] = []
+            y_FP_gesture[subject][i+1] = []
+            theta_FP_gesture[subject][i+1] = []
+    for diff_list in distances:
+        # print(diff_list)
+        if diff_list['result_distance'] != [None]:
+            subject = diff_list['subject']
+            gesture = int(diff_list['gesture'])
+            electrode_place = diff_list['electrode_place']
+            if electrode_place == 'ED':
+                for diff in diff_list['result_distance']:
+                    x_ED_gesture[subject][gesture].append(diff['x_distance'])
+                    y_ED_gesture[subject][gesture].append(diff['y_distance'])
+                    theta_ED_gesture[subject][gesture].append(diff['theta_distance'])
+            elif electrode_place == 'EP':
+                for diff in diff_list['result_distance']:
+                    x_EP_gesture[subject][gesture].append(diff['x_distance'])
+                    y_EP_gesture[subject][gesture].append(diff['y_distance'])
+                    theta_EP_gesture[subject][gesture].append(diff['theta_distance'])
+            elif electrode_place == 'FD':
+                for diff in diff_list['result_distance']:
+                    x_FD_gesture[subject][gesture].append(diff['x_distance'])
+                    y_FD_gesture[subject][gesture].append(diff['y_distance'])
+                    theta_FD_gesture[subject][gesture].append(diff['theta_distance'])
+            elif electrode_place == 'FP':
+                for diff in diff_list['result_distance']:
+                    x_FP_gesture[subject][gesture].append(diff['x_distance'])
+                    y_FP_gesture[subject][gesture].append(diff['y_distance'])
+                    theta_FP_gesture[subject][gesture].append(diff['theta_distance'])
+    # 差分の絶対値
+    x_gesture_mean = {}
+    y_gesture_mean = {}
+    theta_gesture_mean = {}
+    for subject in subjects:
+        x_gesture_mean[subject] = {'value':[], 'mean':0, 'std':0}
+        y_gesture_mean[subject] = {'value':[], 'mean':0, 'std':0}
+        theta_gesture_mean[subject] = {'value':[], 'mean':0, 'std':0}
+        for i in range(n_gestures):
+            for l in range(len(x_ED_gesture[subject][i+1])):
+                x_gesture_mean[subject]['value'].append(np.abs(x_ED_gesture[subject][i+1][l]))
+                y_gesture_mean[subject]['value'].append(np.abs(y_ED_gesture[subject][i+1][l]))
+                theta_gesture_mean[subject]['value'].append(np.abs(theta_ED_gesture[subject][i+1][l]))
+            for l in range(len(x_EP_gesture[subject][i+1])):
+                x_gesture_mean[subject]['value'].append(np.abs(x_EP_gesture[subject][i+1][l]))
+                y_gesture_mean[subject]['value'].append(np.abs(y_EP_gesture[subject][i+1][l]))
+                theta_gesture_mean[subject]['value'].append(np.abs(theta_EP_gesture[subject][i+1][l]))
+            for l in range(len(x_FD_gesture[subject][i+1])):
+                x_gesture_mean[subject]['value'].append(np.abs(x_FD_gesture[subject][i+1][l]))
+                y_gesture_mean[subject]['value'].append(np.abs(y_FD_gesture[subject][i+1][l]))
+                theta_gesture_mean[subject]['value'].append(np.abs(theta_FD_gesture[subject][i+1][l]))
+            for l in range(len(x_FP_gesture[subject][i+1])):
+                x_gesture_mean[subject]['value'].append(np.abs(x_FP_gesture[subject][i+1][l]))
+                y_gesture_mean[subject]['value'].append(np.abs(y_FP_gesture[subject][i+1][l]))
+                theta_gesture_mean[subject]['value'].append(np.abs(theta_FP_gesture[subject][i+1][l]))
+        x_gesture_mean[subject]['mean'] = np.mean(x_gesture_mean[subject]['value'])
+        x_gesture_mean[subject]['std'] = np.std(x_gesture_mean[subject]['value'])
+        y_gesture_mean[subject]['mean'] = np.mean(y_gesture_mean[subject]['value'])
+        y_gesture_mean[subject]['std'] = np.std(y_gesture_mean[subject]['value'])
+        theta_gesture_mean[subject]['mean'] = np.mean(theta_gesture_mean[subject]['value'])
+        theta_gesture_mean[subject]['std'] = np.std(theta_gesture_mean[subject]['value'])
+    # 表の作成
     rows = []
-    for rec in records:
-        row = {k: _serialize_for_csv(rec.get(k, None)) for k in rec.keys()}
-        # 列順を固定したい場合に欠損キーを補完
-        for k in fields:
-            if k not in row:
-                row[k] = None
-        rows.append(row)
+    for subject in subjects:
+        rows.append([subject, 
+                    x_gesture_mean[subject]['mean'], x_gesture_mean[subject]['std'],
+                    y_gesture_mean[subject]['mean'], y_gesture_mean[subject]['std'],
+                    theta_gesture_mean[subject]['mean'], theta_gesture_mean[subject]['std']])
+    abs_df = pd.DataFrame(rows, columns=['Subject', 
+                                        'x_mean', 'x_std', 'y_mean', 'y_std',
+                                        'theta_mean', 'theta_std'])
+    # ジェスチャーごとの差分の絶対値
+    n_gestures_list = []
+    for distance in distances:
+        n_gestures_list.append(int(distance['gesture']))
+    gestures = set(n_gestures_list)
 
-    # 列順をfields優先に（未知のキーがあれば後ろに付ける）
-    extra_cols = [c for c in rows[0].keys() if c not in fields] if rows else []
-    columns = list(fields) + extra_cols
+    x_gesture_mean = {}
+    y_gesture_mean = {}
+    theta_gesture_mean = {}
+    for gesture in gestures:
+        x_gesture_mean[gesture] = {'value':[], 'mean':0, 'std':0}
+        y_gesture_mean[gesture] = {'value':[], 'mean':0, 'std':0}
+        theta_gesture_mean[gesture] = {'value':[], 'mean':0, 'std':0}
+        for subject in subjects:
+            for l in range(len(x_ED_gesture[subject][gesture])):
+                x_gesture_mean[gesture]['value'].append(np.abs(x_ED_gesture[subject][gesture][l]))
+                y_gesture_mean[gesture]['value'].append(np.abs(y_ED_gesture[subject][gesture][l]))
+                theta_gesture_mean[gesture]['value'].append(np.abs(theta_ED_gesture[subject][gesture][l]))
+            for l in range(len(x_EP_gesture[subject][gesture])):
+                x_gesture_mean[gesture]['value'].append(np.abs(x_EP_gesture[subject][gesture][l]))
+                y_gesture_mean[gesture]['value'].append(np.abs(y_EP_gesture[subject][gesture][l]))
+                theta_gesture_mean[gesture]['value'].append(np.abs(theta_EP_gesture[subject][gesture][l]))
+            for l in range(len(x_FD_gesture[subject][gesture])):
+                x_gesture_mean[gesture]['value'].append(np.abs(x_FD_gesture[subject][gesture][l]))
+                y_gesture_mean[gesture]['value'].append(np.abs(y_FD_gesture[subject][gesture][l]))
+                theta_gesture_mean[gesture]['value'].append(np.abs(theta_FD_gesture[subject][gesture][l]))
+            for l in range(len(x_FP_gesture[subject][gesture])):
+                x_gesture_mean[gesture]['value'].append(np.abs(x_FP_gesture[subject][gesture][l]))
+                y_gesture_mean[gesture]['value'].append(np.abs(y_FP_gesture[subject][gesture][l]))
+                theta_gesture_mean[gesture]['value'].append(np.abs(theta_FP_gesture[subject][gesture][l]))
+        x_gesture_mean[gesture]['mean'] = np.mean(x_gesture_mean[gesture]['value'])
+        x_gesture_mean[gesture]['std'] = np.std(x_gesture_mean[gesture]['value'])
+        y_gesture_mean[gesture]['mean'] = np.mean(y_gesture_mean[gesture]['value'])
+        y_gesture_mean[gesture]['std'] = np.std(y_gesture_mean[gesture]['value'])
+        theta_gesture_mean[gesture]['mean'] = np.mean(theta_gesture_mean[gesture]['value'])
+        theta_gesture_mean[gesture]['std'] = np.std(theta_gesture_mean[gesture]['value'])
+    # 表の作成
+    rows = []
+    for gesture in gestures:
+        rows.append([gesture, 
+                    x_gesture_mean[gesture]['mean'], x_gesture_mean[gesture]['std'],
+                    y_gesture_mean[gesture]['mean'], y_gesture_mean[gesture]['std'],
+                    theta_gesture_mean[gesture]['mean'], theta_gesture_mean[gesture]['std']])
+    gesture_df = pd.DataFrame(rows, columns=['Gesture', 
+                                        'x_mean', 'x_std', 'y_mean', 'y_std',
+                                        'theta_mean', 'theta_std'])
+    return abs_df, gesture_df
 
-    df = pd.DataFrame(rows, columns=columns)
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_path, index=False, encoding='utf-8-sig')
-    return out_path
+def csv_saver(muscle_activity_informations, file_name_prefix = 'test3_ptp_gmm'):
+    x_mean, y_mean, theta_mean, x_std, y_std, theta_std, x_max, x_min, y_max, y_min, theta_max, theta_min = scaler(muscle_activity_informations)
+    distances = distances_across_sessions(muscle_activity_informations, scaling=2, x_std=x_std, y_std=y_std, theta_std=theta_std, x_max=x_max, x_min=x_min, y_max=y_max, y_min=y_min, theta_max=theta_max, theta_min=theta_min)
+    abs_df, gesture_df = df_maker(distances)
+    abs_df.to_csv('output/' + file_name_prefix + '_abs_sessions.csv', index=False, encoding="utf-8-sig")
+    gesture_df.to_csv('output/' + file_name_prefix + '_gesture_sessions.csv', index=False, encoding="utf-8-sig")
+    distances = distances_across_trials(muscle_activity_informations, scaling=2, x_std=x_std, y_std=y_std, theta_std=theta_std, x_max=x_max, x_min=x_min, y_max=y_max, y_min=y_min, theta_max=theta_max, theta_min=theta_min)
+    abs_df, gesture_df = df_maker(distances)
+    abs_df.to_csv('output/' + file_name_prefix + '_abs_trials.csv', index=False, encoding="utf-8-sig")
+    gesture_df.to_csv('output/' + file_name_prefix + '_gesture_trials.csv', index=False, encoding="utf-8-sig")
+    distances = distances_across_sessions_and_trials(muscle_activity_informations, scaling=2, x_std=x_std, y_std=y_std, theta_std=theta_std, x_max=x_max, x_min=x_min, y_max=y_max, y_min=y_min, theta_max=theta_max, theta_min=theta_min)
+    abs_df, gesture_df = df_maker(distances)
+    abs_df.to_csv('output/' + file_name_prefix + '_abs_sessions_and_trials.csv', index=False, encoding="utf-8-sig")
+    gesture_df.to_csv('output/' + file_name_prefix + '_gesture_sessions_and_trials.csv', index=False, encoding="utf-8-sig")
 
 
 
 # ----- メイン -----
-if __name__ == "__main__":
-    # 分析
-    preprosess = False #前処理を行うかどうか
-    n_subjects = 5 #20
-    n_sessions = 2
+# if __name__ == "__main__":
+# 分析
+preprosess = False #前処理を行うかどうか
+n_subjects = 5 #20
+n_sessions = 2
 
-    mucle_activity_informations_kmeans32 = []
-    mucle_activity_informations_kmeans42 = []
-    mucle_activity_informations_kmeans43 = []
-    mucle_activity_informations_kmeans52 = []
-    mucle_activity_informations_kmeans53 = []
-    mucle_activity_informations_kmeans54 = []
-    mucle_activity_informations_normalized_kmeans2 = []
-    mucle_activity_informations_normalized_kmeans3 = []
-    mucle_activity_informations_normalized_kmeans4 = []
-    mucle_activity_informations_normalized_kmeans5 = []
-    mucle_activity_informations_xmeans = []
-    mucle_activity_informations_normalized_xmeans = []
-    mucle_activity_informations_hdbscan = []
-    mucle_activity_informations_normalized_hdbscan = []
-    for i in range(n_subjects):
-        for j in range(n_sessions):
-            lines = []
-            gestures= open('pr_dataset/subject{:02}'.format(i+1) + '_session' + str(j+1) + '/label_maintenance.txt', 'r')
-            line = gestures.read()
-            for l in line.split(','):
-                lines.append(l.strip())
-            gestures.close()
-            gesture = 0
-            for k, line in enumerate(lines): #for k, line in enumerate(lines):
-                if gesture == line:
-                    trial = 2
-                else:
-                    trial = 1
-                gesture = line
-                record_name = 'pr_dataset/subject{:02}'.format(i+1) + '_session' + str(j+1) + '/maintenance_preprocess_sample'+str(k+1)
-                # lists.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1})
-                print(record_name) # ファイル名
-                try:
-                    record = wfdb.rdrecord(record_name)
+muscle_activity_informations_kmeans32 = []
+muscle_activity_informations_kmeans42 = []
+muscle_activity_informations_kmeans43 = []
+muscle_activity_informations_kmeans52 = []
+muscle_activity_informations_kmeans53 = []
+muscle_activity_informations_kmeans54 = []
+muscle_activity_informations_normalized_kmeans2 = []
+muscle_activity_informations_normalized_kmeans3 = []
+muscle_activity_informations_normalized_kmeans4 = []
+muscle_activity_informations_normalized_kmeans5 = []
+muscle_activity_informations_xmeans = []
+muscle_activity_informations_normalized_xmeans = []
+muscle_activity_informations_hdbscan = []
+muscle_activity_informations_normalized_hdbscan = []
+for i in range(n_subjects):
+    for j in range(n_sessions):
+        lines = []
+        gestures= open('pr_dataset/subject{:02}'.format(i+1) + '_session' + str(j+1) + '/label_maintenance.txt', 'r')
+        line = gestures.read()
+        for l in line.split(','):
+            lines.append(l.strip())
+        gestures.close()
+        gesture = 0
+        for k, line in enumerate(lines): #for k, line in enumerate(lines):
+            if gesture == line:
+                trial = 2
+            else:
+                trial = 1
+            gesture = line
+            record_name = 'pr_dataset/subject{:02}'.format(i+1) + '_session' + str(j+1) + '/maintenance_preprocess_sample'+str(k+1)
+            # lists.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1})
+            print(record_name) # ファイル名
+            try:
+                record = wfdb.rdrecord(record_name)
 
-                    filtered_emg_ED = record.p_signal[:,:64] #Extensor Distal
-                    filtered_emg_EP = record.p_signal[:,64:128] #Extensor Proximal
-                    filtered_emg_FD = record.p_signal[:,128:192] #Flexor Distal
-                    filtered_emg_FP = record.p_signal[:,192:256] #Flexor Proximal
+                filtered_emg_ED = record.p_signal[:,:64] #Extensor Distal
+                filtered_emg_EP = record.p_signal[:,64:128] #Extensor Proximal
+                filtered_emg_FD = record.p_signal[:,128:192] #Flexor Distal
+                filtered_emg_FP = record.p_signal[:,192:256] #Flexor Proximal
 
-                    electrode_places = [[filtered_emg_ED, 'ED'],
-                                        [filtered_emg_EP, 'EP'],
-                                        [filtered_emg_FD, 'FD'],
-                                        [filtered_emg_FP, 'FP']]
+                electrode_places = [[filtered_emg_ED, 'ED'],
+                                    [filtered_emg_EP, 'EP'],
+                                    [filtered_emg_FD, 'FD'],
+                                    [filtered_emg_FP, 'FP']]
 
-                    for electrode_place in electrode_places:
-                        print(electrode_place[1]) #電極位置
-                        
-                        try:
-                            emg_data = electrode_place[0]
-                            if preprosess:
-                                emg_data = butter_bandpass_filter(emg_data, fs=2048, low_hz=20.0, high_hz=400.0, order=4)
-                            features = gmm(emg_data, gaussian_2d, peak_frequency, fs=2048, window_ms=25, threshold=0, percent=95, max_components=4, criterion='bic', upsample_factor=5, func_type=True)
-                            # 32kmeansクラスタリング
-                            results_df, summary_df = kmeans_clustering(features, k1=3, k2=2)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # 42kmeansクラスタリング
-                            results_df, summary_df = kmeans_clustering(features, k1=4, k2=2)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # 43kmeansクラスタリング
-                            results_df, summary_df = kmeans_clustering(features, k1=4, k2=3)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # 52kmeansクラスタリング
-                            results_df, summary_df = kmeans_clustering(features, k1=5, k2=2)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # 53kmeansクラスタリング
-                            results_df, summary_df = kmeans_clustering(features, k1=5, k2=3)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # 54kmeansクラスタリング
-                            results_df, summary_df = kmeans_clustering(features, k1=5, k2=4)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # 2normalized_kmeansクラスタリング
-                            results_df, summary_df = normalized_kmeans_clustering(features, k1=2)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # 3normalized_kmeansクラスタリング
-                            results_df, summary_df = normalized_kmeans_clustering(features, k1=3)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # 4normalized_kmeansクラスタリング
-                            results_df, summary_df = normalized_kmeans_clustering(features, k1=4)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # 5normalized_kmeansクラスタリング
-                            results_df, summary_df = normalized_kmeans_clustering(features, k1=5)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # xmeansクラスタリング
-                            results_df, summary_df = xmeans_clustering(features, kmax=5)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # normalized_xmeansクラスタリング
-                            results_df, summary_df = normalized_xmeans_clustering(features, kmax=5)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # hdbscanクラスタリング
-                            results_df, summary_df = hdbscan_clustering(features, min_cluster_size=10)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            # normalized_hdbscanクラスタリング
-                            results_df, summary_df = normalized_hdbscan_clustering(features, min_cluster_size=10)
-                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                            mucle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                        except RuntimeError:
-                            mucle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            mucle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                except FileNotFoundError:
-                    pass
+                for electrode_place in electrode_places:
+                    print(electrode_place[1]) #電極位置
+                    
+                    try:
+                        emg_data = electrode_place[0]
+                        if preprosess:
+                            emg_data = butter_bandpass_filter(emg_data, fs=2048, low_hz=20.0, high_hz=400.0, order=4)
+                        features = gmm(emg_data, gaussian_2d, peak_frequency, fs=2048, window_ms=25, threshold=0, percent=95, max_components=4, criterion='bic', upsample_factor=5, func_type=True)
+                        # 32kmeansクラスタリング
+                        results_df, summary_df = kmeans_clustering(features, k1=3, k2=2)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # 42kmeansクラスタリング
+                        results_df, summary_df = kmeans_clustering(features, k1=4, k2=2)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # 43kmeansクラスタリング
+                        results_df, summary_df = kmeans_clustering(features, k1=4, k2=3)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # 52kmeansクラスタリング
+                        results_df, summary_df = kmeans_clustering(features, k1=5, k2=2)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # 53kmeansクラスタリング
+                        results_df, summary_df = kmeans_clustering(features, k1=5, k2=3)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # 54kmeansクラスタリング
+                        results_df, summary_df = kmeans_clustering(features, k1=5, k2=4)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # 2normalized_kmeansクラスタリング
+                        results_df, summary_df = normalized_kmeans_clustering(features, k1=2)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # 3normalized_kmeansクラスタリング
+                        results_df, summary_df = normalized_kmeans_clustering(features, k1=3)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # 4normalized_kmeansクラスタリング
+                        results_df, summary_df = normalized_kmeans_clustering(features, k1=4)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # 5normalized_kmeansクラスタリング
+                        results_df, summary_df = normalized_kmeans_clustering(features, k1=5)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # xmeansクラスタリング
+                        results_df, summary_df = xmeans_clustering(features, kmax=5)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # normalized_xmeansクラスタリング
+                        results_df, summary_df = normalized_xmeans_clustering(features, kmax=5)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # hdbscanクラスタリング
+                        results_df, summary_df = hdbscan_clustering(features, min_cluster_size=10)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                        # normalized_hdbscanクラスタリング
+                        results_df, summary_df = normalized_hdbscan_clustering(features, min_cluster_size=10)
+                        virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                        muscle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                    except RuntimeError:
+                        muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                        muscle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+            except FileNotFoundError:
+                pass
 
-    # csvファイルに保存
-    save_records_to_csv(mucle_activity_informations_kmeans32, out_path='output/test3_peakfrequency_gmm_kmeans32.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans42, out_path='output/test3_peakfrequency_gmm_kmeans42.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans43, out_path='output/test3_peakfrequency_gmm_kmeans43.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans52, out_path='output/test3_peakfrequency_gmm_kmeans52.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans53, out_path='output/test3_peakfrequency_gmm_kmeans53.csv')
-    save_records_to_csv(mucle_activity_informations_kmeans54, out_path='output/test3_peakfrequency_gmm_kmeans54.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans2, out_path='output/test3_peakfrequency_gmm_normalized_kmeans2.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans3, out_path='output/test3_peakfrequency_gmm_normalized_kmeans3.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans4, out_path='output/test3_peakfrequency_gmm_normalized_kmeans4.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_kmeans5, out_path='output/test3_peakfrequency_gmm_normalized_kmeans5.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_peakfrequency_gmm_xmeans.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_xmeans, out_path='output/test3_peakfrequency_gmm_normalized_xmeans.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_peakfrequency_gmm_hdbscan.csv')
-    save_records_to_csv(mucle_activity_informations_normalized_hdbscan, out_path='output/test3_peakfrequency_gmm_normalized_hdbscan.csv')
+# csvファイルに保存
+csv_saver(muscle_activity_informations_kmeans32, file_name_prefix = 'test3_peakfrequency_gmm/kmeans32')
+csv_saver(muscle_activity_informations_kmeans42, file_name_prefix = 'test3_peakfrequency_gmm/kmeans42')
+csv_saver(muscle_activity_informations_kmeans43, file_name_prefix = 'test3_peakfrequency_gmm/kmeans43')
+csv_saver(muscle_activity_informations_kmeans52, file_name_prefix = 'test3_peakfrequency_gmm/kmeans52')
+csv_saver(muscle_activity_informations_kmeans53, file_name_prefix = 'test3_peakfrequency_gmm/kmeans53')
+csv_saver(muscle_activity_informations_kmeans54, file_name_prefix = 'test3_peakfrequency_gmm/kmeans54')
+csv_saver(muscle_activity_informations_normalized_kmeans2, file_name_prefix = 'test3_peakfrequency_gmm/normalized_kmeans2')
+csv_saver(muscle_activity_informations_normalized_kmeans3, file_name_prefix = 'test3_peakfrequency_gmm/normalized_kmeans3')
+csv_saver(muscle_activity_informations_normalized_kmeans4, file_name_prefix = 'test3_peakfrequency_gmm/normalized_kmeans4')
+csv_saver(muscle_activity_informations_normalized_kmeans5, file_name_prefix = 'test3_peakfrequency_gmm/normalized_kmeans5')
+csv_saver(muscle_activity_informations_xmeans, file_name_prefix = 'test3_peakfrequency_gmm/xmeans')
+csv_saver(muscle_activity_informations_normalized_xmeans, file_name_prefix = 'test3_peakfrequency_gmm/normalized_xmeans')
+csv_saver(muscle_activity_informations_hdbscan, file_name_prefix = 'test3_peakfrequency_gmm/hdbscan')
+csv_saver(muscle_activity_informations_normalized_hdbscan, file_name_prefix = 'test3_peakfrequency_gmm/normalized_hdbscan')
+# save_records_to_csv(muscle_activity_informations_kmeans32, out_path='output/test3_ptp_gmm_kmeans32.csv')
+# save_records_to_csv(muscle_activity_informations_kmeans42, out_path='output/test3_ptp_gmm_kmeans42.csv')
+# save_records_to_csv(muscle_activity_informations_kmeans43, out_path='output/test3_ptp_gmm_kmeans43.csv')
+# save_records_to_csv(muscle_activity_informations_kmeans52, out_path='output/test3_ptp_gmm_kmeans52.csv')
+# save_records_to_csv(muscle_activity_informations_kmeans53, out_path='output/test3_ptp_gmm_kmeans53.csv')
+# save_records_to_csv(muscle_activity_informations_kmeans54, out_path='output/test3_ptp_gmm_kmeans54.csv')
+# save_records_to_csv(muscle_activity_informations_normalized_kmeans2, out_path='output/test3_ptp_gmm_normalized_kmeans2.csv')
+# save_records_to_csv(muscle_activity_informations_normalized_kmeans3, out_path='output/test3_ptp_gmm_normalized_kmeans3.csv')
+# save_records_to_csv(muscle_activity_informations_normalized_kmeans4, out_path='output/test3_ptp_gmm_normalized_kmeans4.csv')
+# save_records_to_csv(muscle_activity_informations_normalized_kmeans5, out_path='output/test3_ptp_gmm_normalized_kmeans5.csv')
+# save_records_to_csv(muscle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gmm_xmeans.csv')
+# save_records_to_csv(muscle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gmm_normalized_xmeans.csv')
+# save_records_to_csv(muscle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gmm_hdbscan.csv')
+# save_records_to_csv(muscle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gmm_normalized_hdbscan.csv')
