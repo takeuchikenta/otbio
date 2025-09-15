@@ -1461,100 +1461,94 @@ def main(feature_func, clustering=True, func_type=False, feature_name='ptp'):
                             if preprosess:
                                 emg_data = butter_bandpass_filter(emg_data, fs=2048, low_hz=20.0, high_hz=400.0, order=4)
                             features = gaussian_fitting(emg_data, gaussian_2d, feature_func, fs=2048, window_ms=25, threshold=0, func_type=func_type)
-                            if clustering:
-                                # 32kmeansクラスタリング
-                                results_df, summary_df = kmeans_clustering(features, k1=3, k2=2)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # 42kmeansクラスタリング
-                                results_df, summary_df = kmeans_clustering(features, k1=4, k2=2)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # 43kmeansクラスタリング
-                                results_df, summary_df = kmeans_clustering(features, k1=4, k2=3)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # 52kmeansクラスタリング
-                                results_df, summary_df = kmeans_clustering(features, k1=5, k2=2)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # 53kmeansクラスタリング
-                                results_df, summary_df = kmeans_clustering(features, k1=5, k2=3)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # 54kmeansクラスタリング
-                                results_df, summary_df = kmeans_clustering(features, k1=5, k2=4)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                            else:
-                                # 2normalized_kmeansクラスタリング
-                                results_df, summary_df = normalized_kmeans_clustering(features, k1=2)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # 3normalized_kmeansクラスタリング
-                                results_df, summary_df = normalized_kmeans_clustering(features, k1=3)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # 4normalized_kmeansクラスタリング
-                                results_df, summary_df = normalized_kmeans_clustering(features, k1=4)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # 5normalized_kmeansクラスタリング
-                                results_df, summary_df = normalized_kmeans_clustering(features, k1=5)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # xmeansクラスタリング
-                                results_df, summary_df = xmeans_clustering(features, kmax=5)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # normalized_xmeansクラスタリング
-                                results_df, summary_df = normalized_xmeans_clustering(features, kmax=5)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # hdbscanクラスタリング
-                                results_df, summary_df = hdbscan_clustering(features, min_cluster_size=10)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
-                                # normalized_hdbscanクラスタリング
-                                results_df, summary_df = normalized_hdbscan_clustering(features, min_cluster_size=10)
-                                virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
-                                muscle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 32kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=3, k2=2)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars}) # muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': emg_data, 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 42kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=4, k2=2)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 43kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=4, k2=3)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 52kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=5, k2=2)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 53kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=5, k2=3)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 54kmeansクラスタリング
+                            results_df, summary_df = kmeans_clustering(features, k1=5, k2=4)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 2normalized_kmeansクラスタリング
+                            results_df, summary_df = normalized_kmeans_clustering(features, k1=2)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 3normalized_kmeansクラスタリング
+                            results_df, summary_df = normalized_kmeans_clustering(features, k1=3)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 4normalized_kmeansクラスタリング
+                            results_df, summary_df = normalized_kmeans_clustering(features, k1=4)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # 5normalized_kmeansクラスタリング
+                            results_df, summary_df = normalized_kmeans_clustering(features, k1=5)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # xmeansクラスタリング
+                            results_df, summary_df = xmeans_clustering(features, kmax=5)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # normalized_xmeansクラスタリング
+                            results_df, summary_df = normalized_xmeans_clustering(features, kmax=5)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # hdbscanクラスタリング
+                            results_df, summary_df = hdbscan_clustering(features, min_cluster_size=10)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            # normalized_hdbscanクラスタリング
+                            results_df, summary_df = normalized_hdbscan_clustering(features, min_cluster_size=10)
+                            virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
+                            muscle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
                         except RuntimeError:
-                            if clustering:
-                                muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                            else:
-                                muscle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
-                                muscle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0}) # muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_kmeans42.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_kmeans43.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_kmeans52.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_kmeans53.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_kmeans54.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_normalized_kmeans2.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_normalized_kmeans3.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_normalized_kmeans4.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_normalized_kmeans5.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_normalized_xmeans.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            muscle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
                 except FileNotFoundError:
                     pass
 
     file_name_prefix = 'test4_' + feature_name + '_gaussianfitting'
     # csvファイルに保存
-    if clustering:
-        csv_saver(muscle_activity_informations_kmeans32, file_name_prefix = file_name_prefix + '_kmeans32')
-        csv_saver(muscle_activity_informations_kmeans42, file_name_prefix = file_name_prefix + '_kmeans42')
-        csv_saver(muscle_activity_informations_kmeans43, file_name_prefix = file_name_prefix + '_kmeans43')
-        csv_saver(muscle_activity_informations_kmeans52, file_name_prefix = file_name_prefix + '_kmeans52')
-        csv_saver(muscle_activity_informations_kmeans53, file_name_prefix = file_name_prefix + '_kmeans53')
-        csv_saver(muscle_activity_informations_kmeans54, file_name_prefix = file_name_prefix + '_kmeans54')
-    else:
-        csv_saver(muscle_activity_informations_normalized_kmeans2, file_name_prefix = file_name_prefix + '_normalized_kmeans2')
-        csv_saver(muscle_activity_informations_normalized_kmeans3, file_name_prefix = file_name_prefix + '_normalized_kmeans3')
-        csv_saver(muscle_activity_informations_normalized_kmeans4, file_name_prefix = file_name_prefix + '_normalized_kmeans4')
-        csv_saver(muscle_activity_informations_normalized_kmeans5, file_name_prefix = file_name_prefix + '_normalized_kmeans5')
-        csv_saver(muscle_activity_informations_xmeans, file_name_prefix = file_name_prefix + '_xmeans')
-        csv_saver(muscle_activity_informations_normalized_xmeans, file_name_prefix = file_name_prefix + '_normalized_xmeans')
-        csv_saver(muscle_activity_informations_hdbscan, file_name_prefix = file_name_prefix + '_hdbscan')
-        csv_saver(muscle_activity_informations_normalized_hdbscan, file_name_prefix = file_name_prefix + '_normalized_hdbscan')
+    csv_saver(muscle_activity_informations_kmeans32, file_name_prefix = file_name_prefix + '_kmeans32')
+    csv_saver(muscle_activity_informations_kmeans42, file_name_prefix = file_name_prefix + '_kmeans42')
+    csv_saver(muscle_activity_informations_kmeans43, file_name_prefix = file_name_prefix + '_kmeans43')
+    csv_saver(muscle_activity_informations_kmeans52, file_name_prefix = file_name_prefix + '_kmeans52')
+    csv_saver(muscle_activity_informations_kmeans53, file_name_prefix = file_name_prefix + '_kmeans53')
+    csv_saver(muscle_activity_informations_kmeans54, file_name_prefix = file_name_prefix + '_kmeans54')
+    csv_saver(muscle_activity_informations_normalized_kmeans2, file_name_prefix = file_name_prefix + '_normalized_kmeans2')
+    csv_saver(muscle_activity_informations_normalized_kmeans3, file_name_prefix = file_name_prefix + '_normalized_kmeans3')
+    csv_saver(muscle_activity_informations_normalized_kmeans4, file_name_prefix = file_name_prefix + '_normalized_kmeans4')
+    csv_saver(muscle_activity_informations_normalized_kmeans5, file_name_prefix = file_name_prefix + '_normalized_kmeans5')
+    csv_saver(muscle_activity_informations_xmeans, file_name_prefix = file_name_prefix + '_xmeans')
+    csv_saver(muscle_activity_informations_normalized_xmeans, file_name_prefix = file_name_prefix + '_normalized_xmeans')
+    csv_saver(muscle_activity_informations_hdbscan, file_name_prefix = file_name_prefix + '_hdbscan')
+    csv_saver(muscle_activity_informations_normalized_hdbscan, file_name_prefix = file_name_prefix + '_normalized_hdbscan')
 
     # save_records_to_csv(muscle_activity_informations_kmeans32, out_path='output/test3_ptp_gaussianfitting_kmeans32.csv')
     # save_records_to_csv(muscle_activity_informations_kmeans42, out_path='output/test3_ptp_gaussianfitting_kmeans42.csv')
