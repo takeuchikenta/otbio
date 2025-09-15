@@ -1384,26 +1384,7 @@ def df_maker(distances):
                                         'theta_mean', 'theta_std'])
     return abs_df, gesture_df
 
-def featurename(feature_func):
-    if feature_func == ptp:
-        file_name_prefix = 'ptp'
-    elif feature_func == rms:
-        file_name_prefix = 'rms'
-    elif feature_func == zc:
-        file_name_prefix = 'zc'
-    elif feature_func == waveform_length:
-        file_name_prefix = 'waveformlength'
-    elif feature_func == mean_frequency:
-        file_name_prefix = 'meanfrequency'
-    elif feature_func == median_frequency:
-        file_name_prefix = 'medianfrequency'
-    elif feature_func == peak_frequency:
-        file_name_prefix = 'peakfrequency'
-    elif feature_func == spectral_entropy:
-        file_name_prefix = 'sepectralentropy'
-    return file_name_prefix
-
-def csv_saver(muscle_activity_informations, file_name_prefix = 'test3_ptp_gmm'):
+def csv_saver(muscle_activity_informations, file_name_prefix = 'test3_ptp_gaussianfitting'):
     x_mean, y_mean, theta_mean, x_std, y_std, theta_std, x_max, x_min, y_max, y_min, theta_max, theta_min = scaler(muscle_activity_informations)
     distances = distances_across_sessions(muscle_activity_informations, scaling=2, x_std=x_std, y_std=y_std, theta_std=theta_std, x_max=x_max, x_min=x_min, y_max=y_max, y_min=y_min, theta_max=theta_max, theta_min=theta_min)
     abs_df, gesture_df = df_maker(distances)
@@ -1419,10 +1400,9 @@ def csv_saver(muscle_activity_informations, file_name_prefix = 'test3_ptp_gmm'):
     gesture_df.to_csv('output/' + file_name_prefix + '_gesture_sessions_and_trials.csv', index=False, encoding="utf-8-sig")
 
 
-
 # ----- メイン -----
 # if __name__ == "__main__":
-def main(feature_func, clustering=True, func_type=False):
+def main(feature_func, clustering=True, func_type=False, feature_name='ptp'):
     # 分析
     preprosess = False #前処理を行うかどうか
     n_subjects = 5 #20
@@ -1480,7 +1460,7 @@ def main(feature_func, clustering=True, func_type=False):
                             emg_data = electrode_place[0]
                             if preprosess:
                                 emg_data = butter_bandpass_filter(emg_data, fs=2048, low_hz=20.0, high_hz=400.0, order=4)
-                            features = gmm(emg_data, gaussian_2d, feature_func, fs=2048, window_ms=25, threshold=0, percent=95, max_components=4, criterion='bic', upsample_factor=5, func_type=func_type)
+                            features = gaussian_fitting(emg_data, gaussian_2d, feature_func, fs=2048, window_ms=25, threshold=0, func_type=func_type)
                             if clustering:
                                 # 32kmeansクラスタリング
                                 results_df, summary_df = kmeans_clustering(features, k1=3, k2=2)
@@ -1557,35 +1537,36 @@ def main(feature_func, clustering=True, func_type=False):
                 except FileNotFoundError:
                     pass
 
-    file_name_prefix = 'test3_' + featurename(feature_func) + '_gmm'
+    file_name_prefix = 'test4_' + feature_name + '_gaussianfitting'
     # csvファイルに保存
     if clustering:
-        csv_saver(muscle_activity_informations_kmeans32, file_name_prefix = file_name_prefix + '/kmeans32')
-        csv_saver(muscle_activity_informations_kmeans42, file_name_prefix = file_name_prefix + '/kmeans42')
-        csv_saver(muscle_activity_informations_kmeans43, file_name_prefix = file_name_prefix + '/kmeans43')
-        csv_saver(muscle_activity_informations_kmeans52, file_name_prefix = file_name_prefix + '/kmeans52')
-        csv_saver(muscle_activity_informations_kmeans53, file_name_prefix = file_name_prefix + '/kmeans53')
-        csv_saver(muscle_activity_informations_kmeans54, file_name_prefix = file_name_prefix + '/kmeans54')
+        csv_saver(muscle_activity_informations_kmeans32, file_name_prefix = file_name_prefix + '_kmeans32')
+        csv_saver(muscle_activity_informations_kmeans42, file_name_prefix = file_name_prefix + '_kmeans42')
+        csv_saver(muscle_activity_informations_kmeans43, file_name_prefix = file_name_prefix + '_kmeans43')
+        csv_saver(muscle_activity_informations_kmeans52, file_name_prefix = file_name_prefix + '_kmeans52')
+        csv_saver(muscle_activity_informations_kmeans53, file_name_prefix = file_name_prefix + '_kmeans53')
+        csv_saver(muscle_activity_informations_kmeans54, file_name_prefix = file_name_prefix + '_kmeans54')
     else:
-        csv_saver(muscle_activity_informations_normalized_kmeans2, file_name_prefix = file_name_prefix + '/normalized_kmeans2')
-        csv_saver(muscle_activity_informations_normalized_kmeans3, file_name_prefix = file_name_prefix + '/normalized_kmeans3')
-        csv_saver(muscle_activity_informations_normalized_kmeans4, file_name_prefix = file_name_prefix + '/normalized_kmeans4')
-        csv_saver(muscle_activity_informations_normalized_kmeans5, file_name_prefix = file_name_prefix + '/normalized_kmeans5')
-        csv_saver(muscle_activity_informations_xmeans, file_name_prefix = file_name_prefix + '/xmeans')
-        csv_saver(muscle_activity_informations_normalized_xmeans, file_name_prefix = file_name_prefix + '/normalized_xmeans')
-        csv_saver(muscle_activity_informations_hdbscan, file_name_prefix = file_name_prefix + '/hdbscan')
-        csv_saver(muscle_activity_informations_normalized_hdbscan, file_name_prefix = file_name_prefix + '/normalized_hdbscan')
-    # save_records_to_csv(muscle_activity_informations_kmeans32, out_path='output/test3_ptp_gmm_kmeans32.csv')
-    # save_records_to_csv(muscle_activity_informations_kmeans42, out_path='output/test3_ptp_gmm_kmeans42.csv')
-    # save_records_to_csv(muscle_activity_informations_kmeans43, out_path='output/test3_ptp_gmm_kmeans43.csv')
-    # save_records_to_csv(muscle_activity_informations_kmeans52, out_path='output/test3_ptp_gmm_kmeans52.csv')
-    # save_records_to_csv(muscle_activity_informations_kmeans53, out_path='output/test3_ptp_gmm_kmeans53.csv')
-    # save_records_to_csv(muscle_activity_informations_kmeans54, out_path='output/test3_ptp_gmm_kmeans54.csv')
-    # save_records_to_csv(muscle_activity_informations_normalized_kmeans2, out_path='output/test3_ptp_gmm_normalized_kmeans2.csv')
-    # save_records_to_csv(muscle_activity_informations_normalized_kmeans3, out_path='output/test3_ptp_gmm_normalized_kmeans3.csv')
-    # save_records_to_csv(muscle_activity_informations_normalized_kmeans4, out_path='output/test3_ptp_gmm_normalized_kmeans4.csv')
-    # save_records_to_csv(muscle_activity_informations_normalized_kmeans5, out_path='output/test3_ptp_gmm_normalized_kmeans5.csv')
-    # save_records_to_csv(muscle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gmm_xmeans.csv')
-    # save_records_to_csv(muscle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gmm_normalized_xmeans.csv')
-    # save_records_to_csv(muscle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gmm_hdbscan.csv')
-    # save_records_to_csv(muscle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gmm_normalized_hdbscan.csv')
+        csv_saver(muscle_activity_informations_normalized_kmeans2, file_name_prefix = file_name_prefix + '_normalized_kmeans2')
+        csv_saver(muscle_activity_informations_normalized_kmeans3, file_name_prefix = file_name_prefix + '_normalized_kmeans3')
+        csv_saver(muscle_activity_informations_normalized_kmeans4, file_name_prefix = file_name_prefix + '_normalized_kmeans4')
+        csv_saver(muscle_activity_informations_normalized_kmeans5, file_name_prefix = file_name_prefix + '_normalized_kmeans5')
+        csv_saver(muscle_activity_informations_xmeans, file_name_prefix = file_name_prefix + '_xmeans')
+        csv_saver(muscle_activity_informations_normalized_xmeans, file_name_prefix = file_name_prefix + '_normalized_xmeans')
+        csv_saver(muscle_activity_informations_hdbscan, file_name_prefix = file_name_prefix + '_hdbscan')
+        csv_saver(muscle_activity_informations_normalized_hdbscan, file_name_prefix = file_name_prefix + '_normalized_hdbscan')
+
+    # save_records_to_csv(muscle_activity_informations_kmeans32, out_path='output/test3_ptp_gaussianfitting_kmeans32.csv')
+    # save_records_to_csv(muscle_activity_informations_kmeans42, out_path='output/test3_ptp_gaussianfitting_kmeans42.csv')
+    # save_records_to_csv(muscle_activity_informations_kmeans43, out_path='output/test3_ptp_gaussianfitting_kmeans43.csv')
+    # save_records_to_csv(muscle_activity_informations_kmeans52, out_path='output/test3_ptp_gaussianfitting_kmeans52.csv')
+    # save_records_to_csv(muscle_activity_informations_kmeans53, out_path='output/test3_ptp_gaussianfitting_kmeans53.csv')
+    # save_records_to_csv(muscle_activity_informations_kmeans54, out_path='output/test3_ptp_gaussianfitting_kmeans54.csv')
+    # save_records_to_csv(muscle_activity_informations_normalized_kmeans2, out_path='output/test3_ptp_gaussianfitting_normalized_kmeans2.csv')
+    # save_records_to_csv(muscle_activity_informations_normalized_kmeans3, out_path='output/test3_ptp_gaussianfitting_normalized_kmeans3.csv')
+    # save_records_to_csv(muscle_activity_informations_normalized_kmeans4, out_path='output/test3_ptp_gaussianfitting_normalized_kmeans4.csv')
+    # save_records_to_csv(muscle_activity_informations_normalized_kmeans5, out_path='output/test3_ptp_gaussianfitting_normalized_kmeans5.csv')
+    # save_records_to_csv(muscle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gaussianfitting_xmeans.csv')
+    # save_records_to_csv(muscle_activity_informations_normalized_xmeans, out_path='output/test3_ptp_gaussianfitting_normalized_xmeans.csv')
+    # save_records_to_csv(muscle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gaussianfitting_hdbscan.csv')
+    # save_records_to_csv(muscle_activity_informations_normalized_hdbscan, out_path='output/test3_ptp_gaussianfitting_normalized_hdbscan.csv')
