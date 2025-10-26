@@ -215,11 +215,15 @@ def spectral_entropy(window_2d: np.ndarray, fs: float, nperseg=None, noverlap=No
 # muscle_activity_information.main(peak_frequency, func_type=True, feature_name='peakfrequency', muscle_activity_informations_measurere='gmm', distance_results=False)
 # muscle_activity_information.main(spectral_entropy, func_type=True, feature_name='spectralentropy', muscle_activity_informations_measurere='gmm', distance_results=False)
 
-muscle_activity_information.main(ptp, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gaussianfitting', preprocess=False, n_subjects=5, n_sessions=2, distance_results=False, kmeans32=False, kmeans42=False, kmeans43=True, kmeans52=False, kmeans53=False, kmeans54=False, normalized_kmeans2=False, normalized_kmeans3=False, normalized_kmeans4=False, normalized_kmeans5=False, xmeans=False, normalized_xmeans=False, hdbscan=False, normalized_hdbscan=False)
-# muscle_activity_information.main(zc, func_type=False, feature_name='zc', muscle_activity_informations_measurere='gaussianfitting', distance_results=False)
-# muscle_activity_information.main(rms, func_type=False, feature_name='rms', muscle_activity_informations_measurere='gaussianfitting', distance_results=False)
+# muscle_activity_information.main(ptp, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gaussianfitting', preprocess=False, n_subjects=5, n_sessions=2, distance_results=False, kmeans32=False, kmeans42=False, kmeans43=False, kmeans52=False, kmeans53=False, kmeans54=False, normalized_kmeans2=False, normalized_kmeans3=False, normalized_kmeans4=False, normalized_kmeans5=False, xmeans=False, normalized_xmeans=False, hdbscan=False, normalized_hdbscan=False, features=True)
+# muscle_activity_information.main(zc, func_type=False, feature_name='zc', muscle_activity_informations_measurere='gaussianfitting', preprocess=False, n_subjects=5, n_sessions=2, distance_results=False, features=True)
+# muscle_activity_information.main(rms, func_type=False, feature_name='rms', muscle_activity_informations_measurere='gaussianfitting', preprocess=False, n_subjects=5, n_sessions=2, distance_results=False, features=True)
 # muscle_activity_information.main(waveform_length, func_type=False, feature_name='waveformlength', muscle_activity_informations_measurere='gaussianfitting', distance_results=False)
 # muscle_activity_information.main(mean_frequency, func_type=True, feature_name='meanfrequency', muscle_activity_informations_measurere='gaussianfitting', distance_results=False)
 # muscle_activity_information.main(median_frequency, func_type=True, feature_name='medianfrequency', muscle_activity_informations_measurere='gaussianfitting', distance_results=False)
 # muscle_activity_information.main(peak_frequency, func_type=True, feature_name='peakfrequency', muscle_activity_informations_measurere='gaussianfitting', distance_results=False)
 # muscle_activity_information.main(spectral_entropy, func_type=True, feature_name='spectralentropy', muscle_activity_informations_measurere='gaussianfitting', distance_results=False)
+
+muscle_activity_information.main(ptp, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gmm', preprocess=False, n_subjects=5, n_sessions=2, distance_results=False, features=True)
+muscle_activity_information.main(rms, func_type=False, feature_name='rms', muscle_activity_informations_measurere='gmm', preprocess=False, n_subjects=5, n_sessions=2, distance_results=False, features=True)
+muscle_activity_information.main(zc, func_type=False, feature_name='zc', muscle_activity_informations_measurere='gmm', preprocess=False, n_subjects=5, n_sessions=2, distance_results=False, features=True)

@@ -1004,7 +1004,7 @@ def get_virtual_bipolars(results_df, ied=2, arrow_scale=0.5, show_plot=True):
 FIELDS = [
     'file_name', 'gesture', 'trial', 'subject', 'session',
     'electrode_place', 'virtual_bipolars',
-    'labels', 'center_direction', 'n_virtual_bipolars'
+    'labels', 'center_direction', 'n_virtual_bipolars', 'features'
 ]
 
 def _to_jsonable(x):
@@ -1402,7 +1402,7 @@ def csv_saver(muscle_activity_informations, file_name_prefix = 'test3_ptp_gaussi
 
 # ----- メイン -----
 # if __name__ == "__main__":
-def main(feature_func, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gaussianfitting', preprocess=False, n_subjects=5, n_sessions=2, distance_results=True, kmeans32=False, kmeans42=False, kmeans43=False, kmeans52=False, kmeans53=False, kmeans54=False, normalized_kmeans2=False, normalized_kmeans3=False, normalized_kmeans4=False, normalized_kmeans5=False, xmeans=False, normalized_xmeans=False, hdbscan=False, normalized_hdbscan=False):
+def main(feature_func, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gaussianfitting', preprocess=False, n_subjects=5, n_sessions=2, distance_results=True, kmeans32=False, kmeans42=False, kmeans43=False, kmeans52=False, kmeans53=False, kmeans54=False, normalized_kmeans2=False, normalized_kmeans3=False, normalized_kmeans4=False, normalized_kmeans5=False, xmeans=False, normalized_xmeans=False, hdbscan=False, normalized_hdbscan=False, features=False):
     print(feature_name +'_' + muscle_activity_informations_measurere)
     # 分析
     preprosess = preprocess #前処理を行うかどうか
@@ -1423,6 +1423,7 @@ def main(feature_func, func_type=False, feature_name='ptp', muscle_activity_info
     muscle_activity_informations_normalized_xmeans = []
     muscle_activity_informations_hdbscan = []
     muscle_activity_informations_normalized_hdbscan = []
+    muscle_activity_informations = []
     for i in range(n_subjects):
         for j in range(n_sessions):
             lines = []
@@ -1535,6 +1536,8 @@ def main(feature_func, func_type=False, feature_name='ptp', muscle_activity_info
                                 results_df, summary_df = normalized_hdbscan_clustering(features, min_cluster_size=10)
                                 virtual_bipolars, labels, center_direction, n_virtual_bipolars = get_virtual_bipolars(results_df, show_plot=False)
                                 muscle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'virtual_bipolars': virtual_bipolars, 'labels': labels, 'center_direction': center_direction, 'n_virtual_bipolars': n_virtual_bipolars})
+                            if features:
+                                muscle_activity_informations.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'features': features})
                         except RuntimeError:
                             if kmeans32:
                                 muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0}) # muscle_activity_informations_kmeans32.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'emg_data': [], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
@@ -1564,10 +1567,12 @@ def main(feature_func, func_type=False, feature_name='ptp', muscle_activity_info
                                 muscle_activity_informations_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
                             if normalized_hdbscan:
                                 muscle_activity_informations_normalized_hdbscan.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'virtual_bipolars': [], 'labels': [], 'center_direction': [], 'n_virtual_bipolars': 0})
+                            if features:
+                                muscle_activity_informations.append({'file_name': record_name, 'gesture': gesture, 'trial': trial, 'subject': i+1, 'session': j+1, 'electrode_place':electrode_place[1], 'features': []})
                 except FileNotFoundError:
                     pass
 
-    file_name_prefix = 'test5_' + feature_name + '_' + muscle_activity_informations_measurere
+    file_name_prefix = 'test1_' + feature_name + '_' + muscle_activity_informations_measurere
     # csvファイルに保存
     if distance_results:
         if kmeans32:
@@ -1628,3 +1633,5 @@ def main(feature_func, func_type=False, feature_name='ptp', muscle_activity_info
             save_records_to_csv(muscle_activity_informations_hdbscan, out_path='output/vpolars/' + file_name_prefix + '_hdbscan.csv')
         if normalized_hdbscan:
             save_records_to_csv(muscle_activity_informations_normalized_hdbscan, out_path='output/vpolars/' + file_name_prefix + '_normalized_hdbscan.csv')
+    if features:
+        save_records_to_csv(muscle_activity_informations, out_path='output/features/' + file_name_prefix + '_features.csv')
