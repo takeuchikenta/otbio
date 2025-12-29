@@ -426,7 +426,7 @@ def gmm(emg_data, curve, feature_func, fs=2048, window_ms=25, threshold=0, perce
     for ch in range(64):
         rms_signal = np.sqrt(emg_data[:,ch]**2)
         peaks, _ = find_peaks(rms_signal, distance=50,
-                        height=np.mean(rms_signal) + np.std(rms_signal))
+                        height=np.mean(rms_signal) - np.std(rms_signal))
         # peaks, _ = find_peaks(emg_data[:, ch], distance=window_size//2, height=np.std(emg_data[:,ch]) * 1)
         peak_mask[peaks] = True  # どこか1チャネルでもピークがあればTrue
 
@@ -504,14 +504,86 @@ def gmm(emg_data, curve, feature_func, fs=2048, window_ms=25, threshold=0, perce
                 main_dir = eigvecs[:, np.argmax(eigvals)]
                 angle = np.arctan2(main_dir[1], main_dir[0])  # 方向（ラジアン）
                 angle = ninety2ninety_radian(angle)
+                feature_value = interp_spline(center[1], center[0])[0,0]
 
                 feature = []
                 feature.append(center[0])
                 feature.append(center[1])
                 feature.append(np.degrees(angle))
+                feature.append(feature_value)
                 features.append(feature)
         except ValueError:
             pass
+
+    return features
+
+def gmm_sliding_window(emg_data, feature_func, fs=2000, window_ms=200, hop_ms=50, threshold=0, percent=95, max_components=4, criterion='bic', upsample_factor=5, func_type=True):
+    # ---------- パラメータ設定 ----------
+    window = window_ms   # サンプル幅（例：100ms @ 2kHz）
+    hop = hop_ms    # ホップ（例：25ms）
+    fs = fs
+    window = int(window * (fs/1000))
+    hop = int(hop * (fs/1000))
+    emg_data = emg_data  # shape: (n_samples, n_channels)
+    feature_func = feature_func  # 特徴量抽出関数
+
+
+    # 座標グリッド
+    x = np.arange(8)
+    y = np.arange(8)
+    xv, yv = np.meshgrid(x, y)
+    coords = np.vstack((xv.ravel(), yv.ravel()))
+
+    # ==== 描画用補間座標 ====
+    n_interp = 10  # チャネル間の補間数（1チャネルを10分割）
+    x_interp = np.linspace(0, 7, (8 - 1) * n_interp + 1)
+    y_interp = np.linspace(0, 7, (8 - 1) * n_interp + 1)
+    x_mesh, y_mesh = np.meshgrid(x_interp, y_interp)
+    coords_interp = np.vstack((x_mesh.ravel(), y_mesh.ravel()))  # shape: (2, N)
+
+
+    features = []
+    n_samples, _ = emg_data.shape
+    idx_starts = np.arange(0, max(1, n_samples - window + 1), hop)
+    for s in idx_starts:
+        if s + window <= n_samples:
+            try:
+                segment = emg_data[s:s+window]
+                if func_type:
+                    feature = feature_func(segment, fs=fs) #shape:(64,)
+                else:
+                    feature = feature_func(segment) #shape:(64,)
+                map_2d = feature.reshape(8, 8)
+                map_2d = fill_nan_griddata(map_2d) # NaN補間
+
+                interp_spline = RectBivariateSpline(y, x, map_2d)
+                map_2d = interp_spline(y_interp, x_interp)  # shape: (Nx, Ny)
+
+                percent = percent
+                gmm_coords = np.column_stack(np.where(map_2d >= np.percentile(map_2d, percent)))[:,::-1]
+                weights = map_2d[map_2d >= np.percentile(map_2d, percent)].flatten()
+
+                # GMMを自動選定でフィット
+                gmm = fit_gmm_auto(gmm_coords, max_components=max_components, criterion=criterion, sample_weight=weights, upsample_factor=upsample_factor, map_visualize=False, criterion_visualize=False)
+
+
+                for n, (mean, cov) in enumerate(zip(gmm.means_, gmm.covariances_)):
+                    center = mean / n_interp  # (x, y)
+                    # print(f'mean:{mean}, center:{center}')
+                    eigvals, eigvecs = np.linalg.eigh(cov)
+                    main_dir = eigvecs[:, np.argmax(eigvals)]
+                    angle = np.arctan2(main_dir[1], main_dir[0])  # 方向（ラジアン）
+                    angle = ninety2ninety_radian(angle)
+                    feature_value = interp_spline(center[1], center[0])[0,0]
+
+                    feature = []
+                    feature.append(center[0])
+                    feature.append(center[1])
+                    feature.append(np.degrees(angle))
+                    feature.append(feature_value)
+                    features.append(feature)
+            except ValueError:
+                pass
 
     return features
 
@@ -574,58 +646,74 @@ def save_records_to_csv(records, out_path, fields=FIELDS):
 
 # ----- メイン -----
 # if __name__ == "__main__":
-def main(feature_func, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gmm', subject_list=["garu"]):
+def main(feature_func, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gmm', subject="garu", normalize=False, detection_type='sliding_window'):
     print(feature_name +'_' + muscle_activity_informations_measurere)
 
     muscle_activity_informations = []
-    subject_list = subject_list
+    subject = subject
     hand = "right"
     dir_list = ["1-original", "2-upright", "3-downright", "4-downleft", "5-upleft", "6-clockwise", "7-anticlockwise"]
 
-    for subject in subject_list:
-        for dir in dir_list:
-            if dir == "1-original":
-                filename = "original"
-            elif dir == "2-upright":
-                filename = "upright"
-            elif dir == "3-downright":
-                filename = "downright"
-            elif dir == "4-downleft":
-                filename = "downleft"
-            elif dir == "5-upleft":
-                filename = "upleft"
-            elif dir == "6-clockwise":
-                filename = "clockwise"
-            elif dir == "7-anticlockwise":
-                filename = "anticlockwise"
-            for i in range(1, 6):
-                for j in range(1, 8):
-                    file_name = subject + '/' + hand + '/' + dir + '/set' + str(i) + '/' + filename + '-g' + str(j) + '-' + str(i) + '.csv'
-                    path = '../../data/' + file_name
-                    encoding = 'utf-8-sig'  # または 'utf-16'
-                    df = pd.read_csv(path, encoding=encoding, sep=';', header=None) 
-                    print(file_name)
+    
+    for dir in dir_list:
+        if dir == "1-original":
+            filename = "original"
+        elif dir == "2-upright":
+            filename = "upright"
+        elif dir == "3-downright":
+            filename = "downright"
+        elif dir == "4-downleft":
+            filename = "downleft"
+        elif dir == "5-upleft":
+            filename = "upleft"
+        elif dir == "6-clockwise":
+            filename = "clockwise"
+        elif dir == "7-anticlockwise":
+            filename = "anticlockwise"
+        for i in range(1, 6):
+            for j in range(1, 8):
+                file_name = subject + '/' + hand + '/' + dir + '/set' + str(i) + '/' + filename + '-g' + str(j) + '-' + str(i) + '.csv'
+                path = '../../data/' + file_name
+                encoding = 'utf-8-sig'  # または 'utf-16'
+                df = pd.read_csv(path, encoding=encoding, sep=';', header=None) 
+                print(file_name)
 
-                    # ==== EMGデータの抽出 ====
-                    time = df.iloc[:, 0].values  # 時刻 [s]
-                    emg_data = df.iloc[:, 1:65].values.T  # shape: (64, time)
+                # ==== EMGデータの抽出 ====
+                time = df.iloc[:, 0].values  # 時刻 [s]
+                emg_data = df.iloc[:, 1:65].values.T  # shape: (64, time)
 
-                    # ==== 基本パラメータ ====
-                    fs = int(1 / np.mean(np.diff(time)))  # サンプリング周波数
+                # ==== 基本パラメータ ====
+                fs = int(1 / np.mean(np.diff(time)))  # サンプリング周波数
 
-                    filtered_emg = emg_data = butter_bandpass_filter(emg_data, fs=2048, low_hz=20.0, high_hz=400.0, order=4) #bandpass(emg_data, fs=fs)
-                    emg_data = filtered_emg.T  # shape: (time, 64)
-                        
-                    try:
-                        if muscle_activity_informations_measurere == 'gaussianfitting':
-                            features = gaussian_fitting(emg_data, gaussian_2d, feature_func, fs=2000, window_ms=25, threshold=0, func_type=func_type)
-                        elif muscle_activity_informations_measurere == 'gmm':
+                filtered_emg = emg_data = butter_bandpass_filter(emg_data, fs=2000, low_hz=20.0, high_hz=400.0, order=4) #bandpass(emg_data, fs=fs)
+                emg_data = filtered_emg.T  # shape: (time, 64)
+
+                if normalize:
+                    emg_list = []
+                    for ch in range(emg_data.shape[1]):
+                        data = emg_data[:, ch].reshape(-1, 1)
+                        scaler = MinMaxScaler()
+                        data = scaler.fit_transform(data)  # shape: (n_windows, 36)
+                        emg_list.append(data)
+                    emg_data = np.hstack(emg_list)
+                    
+                try:
+                    if muscle_activity_informations_measurere == 'gaussianfitting':
+                        features = gaussian_fitting(emg_data, gaussian_2d, feature_func, fs=2000, window_ms=25, threshold=0, func_type=func_type)
+                    elif muscle_activity_informations_measurere == 'gmm':
+                        if detection_type == 'sliding_window':
+                            features = gmm_sliding_window(emg_data, feature_func, fs=2000, window_ms=200, hop_ms=50, threshold=0, percent=95, max_components=4, criterion='bic', upsample_factor=5, func_type=func_type)
+                        elif detection_type == 'peak':
                             features = gmm(emg_data, gaussian_2d, feature_func, fs=2000, window_ms=25, threshold=0, percent=95, max_components=4, criterion='bic', upsample_factor=5, func_type=func_type)
-                        muscle_activity_informations.append({'file_name': file_name, 'gesture': j, 'trial': i, 'subject': subject, 'electrode_place':filename, 'features': features})
-                    except RuntimeError:
-                        muscle_activity_informations.append({'file_name': file_name, 'gesture': j, 'trial': i, 'subject': subject, 'electrode_place':filename, 'features': []})
+                    muscle_activity_informations.append({'file_name': file_name, 'gesture': j, 'trial': i, 'subject': subject, 'electrode_place':filename, 'features': features})
+                except RuntimeError:
+                    muscle_activity_informations.append({'file_name': file_name, 'gesture': j, 'trial': i, 'subject': subject, 'electrode_place':filename, 'features': []})
 
 
-    file_name_prefix = 'otbio_test1_' + feature_name + '_' + muscle_activity_informations_measurere
+    
     # csvファイルに保存
-    save_records_to_csv(muscle_activity_informations, out_path='output/features/' + file_name_prefix + '_features.csv')
+    if normalize:
+        file_name_prefix = 'otbio_test4_normalize_slidingwindow_' + subject + '_' + feature_name + '_' + muscle_activity_informations_measurere
+    else:
+        file_name_prefix = 'otbio_test4_slidingwindow_' + subject + '_' + feature_name + '_' + muscle_activity_informations_measurere
+    save_records_to_csv(muscle_activity_informations, out_path='output/' + subject + '/' + file_name_prefix + '_features.csv')

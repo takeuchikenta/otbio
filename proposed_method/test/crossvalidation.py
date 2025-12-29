@@ -40,6 +40,8 @@ np.warnings = warnings
 import torch
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+import glmdtps
+
 
 # ----- バンドパスフィルタ -----
 def _ensure_2d(x: np.ndarray) -> tuple[np.ndarray, bool]:
@@ -940,513 +942,486 @@ def load_records_from_csv(path, json_cols=None, numpy_cols=None, encoding='utf-8
 
 
 
-
+import time
 
 
 # === main ===
-def main(dir='output/features/test1_', feature_name_for_filename = "ptp", subject='yuki', registration='orb', color=False, icc_r = True):
+def main(dir = 'output/features/test1_', feature_name_for_filename = "ptp", subject='yuki', registration='orb'):
     csv_path = dir + feature_name_for_filename + '_gmm_features.csv'       # または 'records.csv.gz'
     json_cols=['virtual_bipolars', 'labels', 'center_direction', 'features']
     numpy_cols=['virtual_bipolars', 'center_direction', 'features']
     df, records = load_records_from_csv(csv_path,json_cols=json_cols,numpy_cols=numpy_cols)
-    print('across trials')
+    print('across sessions')
     print('rows:', len(records))
     print('file name:', csv_path)
     # print(type(records[0]['emg_data']))  # <class 'numpy.ndarray'> を想定
-
     vpolars = records
 
-    theta_list_all = []
-    dx_list_all = []
-    dy_list_all = []
-    scale_list_all = []
-    icc2_list_all = []
-    icc2k_list_all = []
-    r_list_all = []
+
+    # 学習データ
+    emg_list_train = []  # 各要素: shape=(T,8,8)
+    y_list_train   = []  # ファイル名から抽出したラベル（長さ = 試行数）
+    for j in range(7):
+        for k in range(5):
+            try:
+                file_name = file_name_output(subject=subject, hand='right', electrode_place="original", gesture=j+1, trial=k+1)
+                path = '../../data/' + file_name
+                encoding = 'utf-8-sig'  # または 'utf-16'
+                df = pd.read_csv(path, encoding=encoding, sep=';', header=None) 
+
+                # ==== EMGデータの抽出 ====
+                time_emg = df.iloc[:, 0].values  # 時刻 [s]
+                emg_data = df.iloc[:, 1:65].values.T  # shape: (64, time)
+
+                # ==== 基本パラメータ ====
+                fs = int(1 / np.mean(np.diff(time_emg)))  # サンプリング周波数
+                filtered_emg = butter_bandpass_filter(emg_data, fs=fs, low_hz=20.0, high_hz=400.0, order=4)
+                emg_data = filtered_emg.T.reshape(-1,8,8)  # shape: (time, 64)
+                
+                emg_list_train.append(emg_data)
+                y_list_train.append(j+1)
+            except FileNotFoundError:
+                pass
+    
+    # ==============学習フェーズ=============#
+    window = 200   # サンプル幅（例：100ms @ 2kHz）
+    hop    = 50    # ホップ（例：25ms）
+    kind = 'rms'  # 'rms' or 'mav' or 'waveform_length' etc.
+    # X_train = []
+    # y_train = []
+    sizes_te = []
+    threshold = 0
+    threshold2 = 0.0013
+    for i, (emg_train_8x8, label) in enumerate(zip(emg_list_train, y_list_train)):
+        # --- ラベル（学習用）：あなたのラベリングに置き換えてください ---
+        # 中央6×6から特徴抽出した個数に合わせる必要があります。
+        tmp_X = extract_center_6x6(emg_train_8x8)  # (n_samples, 6, 6)
+        tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 6, 6)
+        tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
+        rms = [rms_feat(x) for x in tmp_X]
+        wl = [waveform_length(x) for x in tmp_X]
+        zc = [zero_crossings(x, threshold) for x in tmp_X]
+        ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
+        wamp = [wamp_feat(x, threshold2) for x in tmp_X]
+        # td_psd = [td_psd_multichannel(x, fs=2048, mode="vector") for x in tmp_X]
+        # td_psd = np.array(td_psd)
+        # f1 = td_psd[:,:,0]
+        # f2 = td_psd[:,:,1]
+        # f3 = td_psd[:,:,2]
+        # f4 = td_psd[:,:,3]
+        # f5 = td_psd[:,:,4]
+        # f6 = td_psd[:,:,5]
+        # td_psd = td_psd.reshape(td_psd.shape[0], -1)
+        # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
+        tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
+        # tmp_X = rms
+        # tmp_X = extract_features(emg_train_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
+        n_windows = len(tmp_X)
+        # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
+        tmp_y = [int(label)-1 for i in range(n_windows)]
+        sizes_te.append(n_windows)
+
+        if len(tmp_y) != len(tmp_X):
+            raise ValueError(f"y_train length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
+        
+        if i == 0:
+            X_train = tmp_X
+            y_train = tmp_y
+        else:
+            X_train = np.vstack([X_train, tmp_X])
+            y_train = np.hstack([y_train, tmp_y])
+    
+    clf = RandomForestClassifier(n_estimators=300, random_state=0)
+    clf.fit(X_train, y_train)
+
+    for i, (emg_train_8x8, label) in enumerate(zip(emg_list_train, y_list_train)):
+        tmp_X = segment_time_series(emg_train_8x8, window=window, hop=hop)  # (n_windows, window, 6, 6)
+        tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 64)  # (n_windows, window, 36) #
+        rms = [rms_feat(x) for x in tmp_X]
+        wl = [waveform_length(x) for x in tmp_X]
+        zc = [zero_crossings(x, threshold) for x in tmp_X]
+        ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
+        wamp = [wamp_feat(x, threshold2) for x in tmp_X]
+        # td_psd = [td_psd_multichannel(x, fs=2048, mode="vector") for x in tmp_X]
+        # td_psd = np.array(td_psd)
+        # f1 = td_psd[:,:,0]
+        # f2 = td_psd[:,:,1]
+        # f3 = td_psd[:,:,2]
+        # f4 = td_psd[:,:,3]
+        # f5 = td_psd[:,:,4]
+        # f6 = td_psd[:,:,5]
+        # td_psd = td_psd.reshape(td_psd.shape[0], -1)
+        # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
+        tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
+        # tmp_X = rms
+        # tmp_X = extract_features(emg_train_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
+        n_windows = len(tmp_X)
+        # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
+        tmp_y = [int(label)-1 for i in range(n_windows)]
+        sizes_te.append(n_windows)
+
+        if len(tmp_y) != len(tmp_X):
+            raise ValueError(f"y_train length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
+        
+        if i == 0:
+            X_train = tmp_X
+            y_train = tmp_y
+        else:
+            X_train = np.vstack([X_train, tmp_X])
+            y_train = np.hstack([y_train, tmp_y])
+    
+    clf_normal = RandomForestClassifier(n_estimators=300, random_state=0)
+    clf_normal.fit(X_train, y_train)
+
+    # ==============位置合わせ=============#
+    accracy_all = []
+    accracy_all_normal = []
+    time_alignment_list = []
     for electrode_place in ["upright", "downright", "downleft", "upleft", "clockwise", "anticlockwise"]:
-        theta_list = []
-        dx_list = []
-        dy_list = []
-        scale_list = []
-        icc2_list = []
-        icc2k_list = []
-        r_list = []
+        accuracy_each_position = []
+        accuracy_each_position_normal = []
         for gesture in range(1,8):
             for trial1 in range(1,6):
-                for trial2 in range(trial1,6):
-                    if trial1 != trial2:
-                        file_name1 = file_name_output(subject=subject, hand='right', electrode_place=electrode_place, gesture=gesture, trial=trial1)
-                        file_name2 = file_name_output(subject=subject, hand='right', electrode_place=electrode_place, gesture=gesture, trial=trial2)
+                for trial2 in range(1,6):
+                    start_alignment = time.time() # 時間計測開始
+                    file_name1 = file_name_output(subject=subject, hand='right', electrode_place='original', gesture=gesture, trial=trial1)
+                    file_name2 = file_name_output(subject=subject, hand='right', electrode_place=electrode_place, gesture=gesture, trial=trial2)
 
-                        vpolar_session1 = [vpolar for vpolar in vpolars if vpolar['file_name'] == file_name1][0]
-                        vpolar_session2 = [vpolar for vpolar in vpolars if vpolar['file_name'] == file_name2][0]
+                    vpolar_session1 = [vpolar for vpolar in vpolars if vpolar['file_name'] == file_name1][0]
+                    vpolar_session2 = [vpolar for vpolar in vpolars if vpolar['file_name'] == file_name2][0]
 
-                        keypoints_ref = []
-                        activity_ref = []
-                        for i in range(vpolar_session1['features'].shape[0]):
-                            if color == False: #vpolar_session1['features'].shape[1] == 3:
-                                amp = 1.0
-                            elif color ==True and vpolar_session1['features'].shape[1] == 4:
-                                amp = vpolar_session1['features'][i,3]
-                            else:
-                                amp = 1.0
-                                if gesture == 1 and trial1 == 1 and trial2 ==1:
-                                    print("Warning: color=True but features do not have amplitude information.")
-                            keypoints_ref.append({"x":vpolar_session1['features'][i,0]*10, "y": vpolar_session1['features'][i,1]*10, 
-                                                "angle": np.radians(vpolar_session1['features'][i,2]), "amp":amp})
-                            activity_ref.append({"x":vpolar_session1['features'][i,0]*10, "y": vpolar_session1['features'][i,1]*10, 
-                                                "angle_rad": np.radians(vpolar_session1['features'][i,2]), "size_px": 1.0, "amp":amp})
+                    keypoints_ref = []
+                    activity_ref = []
+                    for i in range(vpolar_session1['features'].shape[0]):
+                        if vpolar_session1['features'].shape[1] == 3:
+                            amp = 1.0
+                        elif vpolar_session1['features'].shape[1] == 4:
+                            amp = vpolar_session1['features'][i,3]
+                        keypoints_ref.append({"x":vpolar_session1['features'][i,0]*10, "y": vpolar_session1['features'][i,1]*10, 
+                                            "angle": np.radians(vpolar_session1['features'][i,2]), "amp":amp})
+                        activity_ref.append({"x":vpolar_session1['features'][i,0]*10, "y": vpolar_session1['features'][i,1]*10, 
+                                            "angle_rad": np.radians(vpolar_session1['features'][i,2]), "size_px": 1.0, "amp":amp})
 
-                        keypoints_test = []
-                        activity_test = []
-                        for i in range(vpolar_session2['features'].shape[0]):
-                            if color == False: #vpolar_session1['features'].shape[1] == 3:
-                                amp = 1.0
-                            elif color ==True and vpolar_session2['features'].shape[1] == 4:
-                                amp = vpolar_session2['features'][i,3]
-                            else:
-                                amp = 1.0
-                                if gesture == 1 and trial1 == 1 and trial2 ==1:
-                                    print("Warning: color=True but features do not have amplitude information.")
-                            keypoints_test.append({"x":vpolar_session2['features'][i,0]*10, "y": vpolar_session2['features'][i,1]*10, 
-                                                "angle": np.radians(vpolar_session2['features'][i,2]), "amp":amp})
-                            activity_test.append({"x":vpolar_session2['features'][i,0]*10, "y": vpolar_session2['features'][i,1]*10, 
-                                                "angle_rad": np.radians(vpolar_session2['features'][i,2]), "size_px": 1.0, "amp":amp})
+                    keypoints_test = []
+                    activity_test = []
+                    for i in range(vpolar_session2['features'].shape[0]):
+                        if vpolar_session2['features'].shape[1] == 3:
+                            amp = 1.0
+                        elif vpolar_session2['features'].shape[1] == 4:
+                            amp = vpolar_session2['features'][i,3]
+                        keypoints_test.append({"x":vpolar_session2['features'][i,0]*10, "y": vpolar_session2['features'][i,1]*10, 
+                                            "angle": np.radians(vpolar_session2['features'][i,2]), "amp":amp})
+                        activity_test.append({"x":vpolar_session2['features'][i,0]*10, "y": vpolar_session2['features'][i,1]*10, 
+                                            "angle_rad": np.radians(vpolar_session2['features'][i,2]), "size_px": 1.0, "amp":amp})
 
-                        rate = 10
-                        keypoints_ref = scale_keypoints(keypoints_ref, scale=rate)
-                        keypoints_test = scale_keypoints(keypoints_test, scale=rate)
+                    rate = 10
+                    keypoints_ref = scale_keypoints(keypoints_ref, scale=rate)
+                    keypoints_test = scale_keypoints(keypoints_test, scale=rate)
 
-                        img_u8, img_f = draw_keypoints_as_sticks(
-                            keypoints_ref,
-                            canvas_h=71 * rate,
-                            canvas_w=71 * rate,
-                            stick_len=5.0,          # 棒の長さ [px]
-                            stick_thickness=1,       # 棒の太さ [px]
-                            angle_is_deg=False,      # 入力のangleはラジアン
-                            intensity_key="amp",     # ampの大きい筋活動は明るい棒になる
-                            intensity_default=1.0,
-                            use_wrap=True,           # 方向はθ≡θ+πでwrapして軸に揃える
-                            combine_mode="max",      # 重ねた棒は足し算
-                            clip_output=True
-                        )
+                    img_u8, img_f = draw_keypoints_as_sticks(
+                        keypoints_ref,
+                        canvas_h=71 * rate,
+                        canvas_w=71 * rate,
+                        stick_len=5.0,          # 棒の長さ [px]
+                        stick_thickness=1,       # 棒の太さ [px]
+                        angle_is_deg=False,      # 入力のangleはラジアン
+                        intensity_key="amp",     # ampの大きい筋活動は明るい棒になる
+                        intensity_default=1.0,
+                        use_wrap=True,           # 方向はθ≡θ+πでwrapして軸に揃える
+                        combine_mode="max",      # 重ねた棒は足し算
+                        clip_output=True
+                    )
 
-                        img_u8_test, img_f_test = draw_keypoints_as_sticks(
-                            keypoints_test,
-                            canvas_h=71 * rate,
-                            canvas_w=71 * rate,
-                            stick_len=5.0,          # 棒の長さ [px]
-                            stick_thickness=1,       # 棒の太さ [px]
-                            angle_is_deg=False,      # 入力のangleはラジアン
-                            intensity_key="amp",     # ampの大きい筋活動は明るい棒になる
-                            intensity_default=1.0,
-                            use_wrap=True,           # 方向はθ≡θ+πでwrapして軸に揃える
-                            combine_mode="max",      # 重ねた棒は足し算
-                            clip_output=True
-                        )
+                    img_u8_test, img_f_test = draw_keypoints_as_sticks(
+                        keypoints_test,
+                        canvas_h=71 * rate,
+                        canvas_w=71 * rate,
+                        stick_len=5.0,          # 棒の長さ [px]
+                        stick_thickness=1,       # 棒の太さ [px]
+                        angle_is_deg=False,      # 入力のangleはラジアン
+                        intensity_key="amp",     # ampの大きい筋活動は明るい棒になる
+                        intensity_default=1.0,
+                        use_wrap=True,           # 方向はθ≡θ+πでwrapして軸に揃える
+                        combine_mode="max",      # 重ねた棒は足し算
+                        clip_output=True
+                    )
 
-                        try:
-                            img_ref = img_u8
-                            img_test = img_u8_test
-                            if registration == 'orb':
-                                # ORB
-                                orb = cv2.ORB_create()
-                                kp1, des1 = orb.detectAndCompute(img_ref, None)
-                                kp2, des2 = orb.detectAndCompute(img_test, None)
+                    try:
+                        img_ref = img_u8
+                        img_test = img_u8_test
+                        if registration == 'orb':
+                            # ORB
+                            orb = cv2.ORB_create()
+                            kp1, des1 = orb.detectAndCompute(img_ref, None)
+                            kp2, des2 = orb.detectAndCompute(img_test, None)
 
-                                # AKAZE
-                                # akaze = cv2.AKAZE_create() 
-                                # kp1, des1 = akaze.detectAndCompute(img_ref, None)
-                                # kp2, des2 = akaze.detectAndCompute(img_test, None)
+                            # AKAZE
+                            # akaze = cv2.AKAZE_create() 
+                            # kp1, des1 = akaze.detectAndCompute(img_ref, None)
+                            # kp2, des2 = akaze.detectAndCompute(img_test, None)
 
-                                # BFMatcherオブジェクトを作成
-                                bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+                            # BFMatcherオブジェクトを作成
+                            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
-                                # 記述子をマッチング
-                                matches = bf.match(des1, des2)
+                            # 記述子をマッチング
+                            matches = bf.match(des1, des2)
 
-                                # マッチングを距離でソート（小さいほど良い）
-                                matches = sorted(matches, key=lambda x: x.distance)
+                            # マッチングを距離でソート（小さいほど良い）
+                            matches = sorted(matches, key=lambda x: x.distance)
 
-                                # マッチした点ペア座標を取り出し
-                                src_pts = np.float32([kp1[m.queryIdx].pt for m in matches])  # (N,2)
-                                dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]) # (N,2)
+                            # マッチした点ペア座標を取り出し
+                            src_pts = np.float32([kp1[m.queryIdx].pt for m in matches])  # (N,2)
+                            dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]) # (N,2)
 
-                                # アフィンをRANSACで推定
-                                # estimateAffinePartial2D は
-                                #   回転 + 並進 + 等方スケール + (わずかなせん断まで含み得る)
-                                # を推定する。
-                                M, inliers = cv2.estimateAffinePartial2D(src_pts,dst_pts)
-                                # M: shape (2,3)
-                                # inliers: shape (N,1) with 0/1
+                            # アフィンをRANSACで推定
+                            # estimateAffinePartial2D は
+                            #   回転 + 並進 + 等方スケール + (わずかなせん断まで含み得る)
+                            # を推定する。
+                            M, inliers = cv2.estimateAffinePartial2D(src_pts,dst_pts)
+                            # M: shape (2,3)
+                            # inliers: shape (N,1) with 0/1
 
-                                if M is None:
-                                    raise RuntimeError("アフィン推定に失敗しました (M is None).")
+                            if M is None:
+                                raise RuntimeError("アフィン推定に失敗しました (M is None).")
 
-                                # M = [ [a b tx],
-                                #       [c d ty] ]
-                                a, b, tx = M[0,0], M[0,1], M[0,2]
-                                c, d, ty = M[1,0], M[1,1], M[1,2]
+                            # M = [ [a b tx],
+                            #       [c d ty] ]
+                            a, b, tx = M[0,0], M[0,1], M[0,2]
+                            c, d, ty = M[1,0], M[1,1], M[1,2]
 
-                                # 2x2部分を回転+スケールに分解
-                                #   [a b; c d] ≈ s * [cosθ -sinθ; sinθ cosθ]
-                                scale = np.sqrt(a*a + c*c) + 1e-12
-                                rot_rad = np.arctan2(c, a)  # atan2(s sinθ, s cosθ) = θ
-                                rot_deg = rot_rad * 180.0 / np.pi
+                            # 2x2部分を回転+スケールに分解
+                            #   [a b; c d] ≈ s * [cosθ -sinθ; sinθ cosθ]
+                            scale = np.sqrt(a*a + c*c) + 1e-12
+                            rot_rad = np.arctan2(c, a)  # atan2(s sinθ, s cosθ) = θ
+                            rot_deg = rot_rad * 180.0 / np.pi
 
-                                result = {
-                                    "M": M,
-                                    "angle_deg": float(rot_deg),
-                                    "dx_px": float(tx),
-                                    "dy_px": float(ty),
-                                    "scale": float(scale),
-                                    "n_inliers": int(np.sum(inliers)),
-                                    "n_matches": len(matches),
-                                    "inliers_mask": inliers.flatten().astype(bool)
-                                }
+                            result = {
+                                "M": M,
+                                "angle_deg": float(rot_deg),
+                                "dx_px": float(tx),
+                                "dy_px": float(ty),
+                                "scale": float(scale),
+                                "n_inliers": int(np.sum(inliers)),
+                                "n_matches": len(matches),
+                                "inliers_mask": inliers.flatten().astype(bool)
+                            }
 
-                                # print("推定回転角 [deg]:", result["angle_deg"])
-                                # print("推定並進 [px]:   dx =", result["dx_px"], ", dy =", result["dy_px"])
-                                # print("推定並進 [mm]:   dx =", result["dx_px"]/rate, ", dy =", result["dy_px"]/rate)
-                                # print("推定スケール   :", result["scale"])
-                                # print("マッチ数 / インライヤ数:", result["n_inliers"], "/", result["n_matches"])
-                                angle_deg = result["angle_deg"]
-                                dx_px = result["dx_px"]
-                                dy_px = result["dy_px"]
-                                scale = result["scale"]
-                                
-                                theta_list.append(angle_deg)
-                                dx_list.append(dx_px/rate)  # mm単位
-                                dy_list.append(dy_px/rate)  # mm単位
-                                scale_list.append(scale)
+                            # print("推定回転角 [deg]:", result["angle_deg"])
+                            # print("推定並進 [px]:   dx =", result["dx_px"], ", dy =", result["dy_px"])
+                            # print("推定並進 [mm]:   dx =", result["dx_px"]/rate, ", dy =", result["dy_px"]/rate)
+                            # print("推定スケール   :", result["scale"])
+                            # print("マッチ数 / インライヤ数:", result["n_inliers"], "/", result["n_matches"])
+                            angle_deg = result["angle_deg"]
+                            dx_px = result["dx_px"]
+                            dy_px = result["dy_px"]
+                            scale = result["scale"]
+                            
+                            
+                        
+                        elif registration == 'itk':
+                            # Forward Parameter Map
+                            parameter_object = itk.ParameterObject.New()
+                            parameter_map_rigid = parameter_object.GetDefaultParameterMap('rigid')
+                            parameter_object.AddParameterMap(parameter_map_rigid)
+                            # parameter_map_affine= parameter_object.GetDefaultParameterMap('affine')
+                            # parameter_object.AddParameterMap(parameter_map_affine)
+                            # parameter_map_bspline = parameter_object.GetDefaultParameterMap('bspline')
+                            # parameter_object.AddParameterMap(parameter_map_bspline)
 
-                                theta_list_all.append(angle_deg)
-                                dx_list_all.append(dx_px/rate)  # mm単位
-                                dy_list_all.append(dy_px/rate)  # mm単位
-                                scale_list_all.append(scale)
+                            # Registration
+                            result_image, result_transform_parameters = itk.elastix_registration_method(
+                                img_test, img_ref,
+                                parameter_object=parameter_object,
+                                #output_directory='exampleoutput/fwd'
+                            )
+                            # 0番目のマップ（Rigid変換）を取得
+                            rigid_map = result_transform_parameters.GetParameterMap(0)
 
-                            elif registration == 'sizefixedorb':
-                                # ORB
-                                grid_size = 50
-                                kp1 = []
-                                for y in range(grid_size, img_ref.shape[0] - grid_size, grid_size):
-                                    for x in range(grid_size, img_ref.shape[1] - grid_size, grid_size):
-                                        # size=31 と手動で設定（この値が周辺の参照範囲を決める）
-                                        kp1.append(cv2.KeyPoint(float(x), float(y), size=200))
-                                kp2 = []
-                                for y in range(grid_size, img_test.shape[0] - grid_size, grid_size):
-                                    for x in range(grid_size, img_test.shape[1] - grid_size, grid_size):
-                                        kp2.append(cv2.KeyPoint(float(x), float(y), size=200))
-                                # 2. 特徴記述子の生成 (ORBを使用)
-                                orb = cv2.ORB_create()
-                                # 検出(detect)はせず、手動キーポイントに対して計算(compute)のみ行う
-                                kp1, des1 = orb.compute(img_ref, kp1)
-                                kp2, des2 = orb.compute(img_test, kp2)
+                            # 'TransformParameters' キーから値を取得（文字列のタプルとして返されます）
+                            # 2Dの場合: (Angle, Tx, Ty)
+                            # 3Dの場合: (Rx, Ry, Rz, Tx, Ty, Tz) ※オイラー角の定義に注意
+                            raw_params = rigid_map['TransformParameters']
 
-                                # BFMatcherオブジェクトを作成
-                                bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+                            # float型に変換
+                            params = [float(p) for p in raw_params]
 
-                                # 記述子をマッチング
-                                matches = bf.match(des1, des2)
+                            angle_deg = np.degrees(params[0])
+                            dx_px = params[1]
+                            dy_px = params[2]
+                            scale = 1.0
+                            
+                            
 
-                                # マッチングを距離でソート（小さいほど良い）
-                                matches = sorted(matches, key=lambda x: x.distance)
-
-                                # マッチした点ペア座標を取り出し
-                                src_pts = np.float32([kp1[m.queryIdx].pt for m in matches])  # (N,2)
-                                dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]) # (N,2)
-
-                                # アフィンをRANSACで推定
-                                # estimateAffinePartial2D は
-                                #   回転 + 並進 + 等方スケール + (わずかなせん断まで含み得る)
-                                # を推定する。
-                                M, inliers = cv2.estimateAffinePartial2D(src_pts,dst_pts)
-                                # M: shape (2,3)
-                                # inliers: shape (N,1) with 0/1
-
-                                if M is None:
-                                    raise RuntimeError("アフィン推定に失敗しました (M is None).")
-
-                                # M = [ [a b tx],
-                                #       [c d ty] ]
-                                a, b, tx = M[0,0], M[0,1], M[0,2]
-                                c, d, ty = M[1,0], M[1,1], M[1,2]
-
-                                # 2x2部分を回転+スケールに分解
-                                #   [a b; c d] ≈ s * [cosθ -sinθ; sinθ cosθ]
-                                scale = np.sqrt(a*a + c*c) + 1e-12
-                                rot_rad = np.arctan2(c, a)  # atan2(s sinθ, s cosθ) = θ
-                                rot_deg = rot_rad * 180.0 / np.pi
-
-                                result = {
-                                    "M": M,
-                                    "angle_deg": float(rot_deg),
-                                    "dx_px": float(tx),
-                                    "dy_px": float(ty),
-                                    "scale": float(scale),
-                                    "n_inliers": int(np.sum(inliers)),
-                                    "n_matches": len(matches),
-                                    "inliers_mask": inliers.flatten().astype(bool)
-                                }
-
-                                # print("推定回転角 [deg]:", result["angle_deg"])
-                                # print("推定並進 [px]:   dx =", result["dx_px"], ", dy =", result["dy_px"])
-                                # print("推定並進 [mm]:   dx =", result["dx_px"]/rate, ", dy =", result["dy_px"]/rate)
-                                # print("推定スケール   :", result["scale"])
-                                # print("マッチ数 / インライヤ数:", result["n_inliers"], "/", result["n_matches"])
-                                angle_deg = result["angle_deg"]
-                                dx_px = result["dx_px"]
-                                dy_px = result["dy_px"]
-                                scale = result["scale"]
-                                
-                                theta_list.append(angle_deg)
-                                dx_list.append(dx_px/rate)  # mm単位
-                                dy_list.append(dy_px/rate)  # mm単位
-                                scale_list.append(scale)
-
-                                theta_list_all.append(angle_deg)
-                                dx_list_all.append(dx_px/rate)  # mm単位
-                                dy_list_all.append(dy_px/rate)  # mm単位
-                                scale_list_all.append(scale)
-
-                            elif registration == 'itk':
-                                # Forward Parameter Map
-                                parameter_object = itk.ParameterObject.New()
-                                parameter_map_rigid = parameter_object.GetDefaultParameterMap('rigid')
-                                parameter_object.AddParameterMap(parameter_map_rigid)
-                                # parameter_map_affine= parameter_object.GetDefaultParameterMap('affine')
-                                # parameter_object.AddParameterMap(parameter_map_affine)
-                                # parameter_map_bspline = parameter_object.GetDefaultParameterMap('bspline')
-                                # parameter_object.AddParameterMap(parameter_map_bspline)
-
-                                # Registration
-                                result_image, result_transform_parameters = itk.elastix_registration_method(
-                                    img_test, img_ref,
-                                    parameter_object=parameter_object,
-                                    #output_directory='exampleoutput/fwd'
-                                )
-                                # 0番目のマップ（Rigid変換）を取得
-                                rigid_map = result_transform_parameters.GetParameterMap(0)
-
-                                # 'TransformParameters' キーから値を取得（文字列のタプルとして返されます）
-                                # 2Dの場合: (Angle, Tx, Ty)
-                                # 3Dの場合: (Rx, Ry, Rz, Tx, Ty, Tz) ※オイラー角の定義に注意
-                                raw_params = rigid_map['TransformParameters']
-
-                                # float型に変換
-                                params = [float(p) for p in raw_params]
-
-                                angle_deg = np.degrees(params[0])
-                                dx_px = params[1]
-                                dy_px = params[2]
+                        elif registration == 'glmdtps':
+                            # GLMDTPS Registration
+                            
+                            # Extract points from keypoints
+                            # keypoints are dicts with 'x', 'y'
+                            src_pts = np.array([[kp['x'], kp['y']] for kp in keypoints_ref], dtype=np.float64)
+                            dst_pts = np.array([[kp['x'], kp['y']] for kp in keypoints_test], dtype=np.float64)
+                            
+                            # GLMDTPS expects 3D points usually, but let's check our implementation.
+                            # Our python port handles arbitrary dimensions (dims variable).
+                            # So 2D is fine.
+                            
+                            # Run GLMDTPS
+                            # Returns warped source points (same shape as src_pts)
+                            warped_pts = glmdtps.glmdtps_registration(src_pts, dst_pts, max_iter=50, visualize=False)
+                            
+                            # Estimate rigid transformation from Source -> Warped Source
+                            # This represents the "deformation" applied by GLMDTPS to match the target.
+                            # However, usually we want the transform that aligns Source to Target.
+                            # Since Warped Source is close to Target, this is effectively Source -> Target.
+                            
+                            M, inliers = cv2.estimateAffinePartial2D(src_pts.astype(np.float32), warped_pts.astype(np.float32))
+                            
+                            if M is None:
+                                # Fallback if estimation fails (should be rare for corresponding points)
+                                angle_deg = 0.0
+                                dx_px = 0.0
+                                dy_px = 0.0
                                 scale = 1.0
+                            else:
+                                a, b, tx = M[0,0], M[0,1], M[0,2]
+                                c, d, ty = M[1,0], M[1,1], M[1,2]
                                 
-                                theta_list.append(angle_deg)
-                                dx_list.append(dx_px/rate)  # mm単位
-                                dy_list.append(dy_px/rate)  # mm単位
-                                scale_list.append(scale)
+                                scale = np.sqrt(a*a + c*c)
+                                rot_rad = np.arctan2(c, a)
+                                angle_deg = np.degrees(rot_rad)
+                                dx_px = tx
+                                dy_px = ty
+                                
+                        end_alignment = time.time() # 時間計測終了
+                        time_alignment = end_alignment - start_alignment
+                        time_alignment_list.append(time_alignment)
+                            
 
-                                theta_list_all.append(angle_deg)
-                                dx_list_all.append(dx_px/rate)  # mm単位
-                                dy_list_all.append(dy_px/rate)  # mm単位
-                                scale_list_all.append(scale)
+                        # ==============推論フェーズ=============#
+                        emg_list_test = []
+                        y_list_test   = []
+                        for j in range(7):
+                            for k in range(5):
+                                try:
+                                    if k+1 != trial2:
+                                        file_name = file_name_output(subject=subject, hand='right', electrode_place=electrode_place, gesture=j+1, trial=k+1)
+                                        path = '../../data/' + file_name
+                                        encoding = 'utf-8-sig'  # または 'utf-16'
+                                        df = pd.read_csv(path, encoding=encoding, sep=';', header=None) 
 
-                            if icc_r:
-                                feature_name = "rms"
-                                subject_name = subject
+                                        # ==== EMGデータの抽出 ====
+                                        time_emg = df.iloc[:, 0].values  # 時刻 [s]
+                                        emg_data = df.iloc[:, 1:65].values.T  # shape: (64, time)
 
-                                window = 200
-                                hop = 50
-                                threshold = 0
-                                threshold2 = 0.0013
+                                        # ==== 基本パラメータ ====
+                                        fs = int(1 / np.mean(np.diff(time_emg)))  # サンプリング周波数
 
-                                spacing = 1.0 # 電極間距離の単位
-                                rotate_about = "grid_center"  # or "top_left"
-                                mode = "extrapolate"   # or "clip"
+                                        filtered_emg = butter_bandpass_filter(emg_data, fs=fs, low_hz=20.0, high_hz=400.0, order=4)
+                                        emg_data = filtered_emg.T.reshape(-1,8,8)  # shape: (time, 64)
+                                        
+                                        emg_list_test.append(emg_data)
+                                        y_list_test.append(j+1)
+                                except FileNotFoundError:
+                                    pass
 
-                                dx_ref = 0.0
-                                dy_ref = 0.0
-                                theta_ref = 0.0
+                        dx = dx_px/(rate*10)  # mm→チャネル単位
+                        dy = dy_px/(rate*10)  # mm→チャネル単位
+                        theta = np.radians(angle_deg)  # degree
+                        spacing = 1.0
+                        rotate_about = "grid_center"  # or "top_left"
+                        mode = "extrapolate"          # or "clip"
+                        for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
+                            # --- ラベル（学習用）：あなたのラベリングに置き換えてください ---
+                            # 中央6×6から特徴抽出した個数に合わせる必要があります。
+                            mapper = GridSubsetMapper(spacing=spacing, rotate_about=rotate_about)
+                            tmp_X = mapper.transform(emg_test_8x8, dx=dx, dy=dy, theta=theta, mode=mode)  # (n,6,6)
 
-                                dx_test = dx_px/(rate*10)  # mm→チャネル単位
-                                dy_test = dy_px/(rate*10)  # mm→チャネル単位
-                                theta_test = np.radians(angle_deg)  # degree
+                            tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 6, 6)
+                            tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
+                            rms = [rms_feat(x) for x in tmp_X]
+                            wl = [waveform_length(x) for x in tmp_X]
+                            zc = [zero_crossings(x, threshold) for x in tmp_X]
+                            ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
+                            wamp = [wamp_feat(x, threshold2) for x in tmp_X]
+                            # td_psd = [td_psd_multichannel(x, fs=2048, mode="vector") for x in tmp_X]
+                            # td_psd = np.array(td_psd)
+                            # f1 = td_psd[:,:,0]
+                            # f2 = td_psd[:,:,1]
+                            # f3 = td_psd[:,:,2]
+                            # f4 = td_psd[:,:,3]
+                            # f5 = td_psd[:,:,4]
+                            # f6 = td_psd[:,:,5]
+                            # td_psd = td_psd.reshape(td_psd.shape[0], -1)
+                            # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
+                            tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
+                            # tmp_X = rms
+                            n_windows = len(tmp_X)
+                            # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
+                            tmp_y = [int(label)-1 for i in range(n_windows)]
 
-                                session_list= [(dx_ref, dy_ref, theta_ref), (dx_test, dy_test, theta_test)]
-                                features_ref_icc = []
-                                for i, session in enumerate(session_list):
-                                    for j in range(7):
-                                        for k in range(5):
-                                            file_name = file_name_output(subject=subject_name, hand='right', electrode_place=electrode_place, gesture=j+1, trial=k+1)
-                                            path = '../../data/' + file_name
-                                            encoding = 'utf-8-sig'  # または 'utf-16'
-                                            df = pd.read_csv(path, encoding=encoding, sep=';', header=None) 
+                            if len(tmp_y) != len(tmp_X):
+                                raise ValueError(f"y_train length ({len(y_train)}) must match number of windows ({len(X)})")
+                            
+                            if i ==0:
+                                X_test = tmp_X
+                                y_test = tmp_y
+                            else:
+                                X_test = np.vstack([X_test, tmp_X])
+                                y_test = np.hstack([y_test, tmp_y])
 
-                                            # ==== EMGデータの抽出 ====
-                                            time = df.iloc[:, 0].values  # 時刻 [s]
-                                            emg_data = df.iloc[:, 1:65].values.T  # shape: (64, time)
+                        y_pred = clf.predict(X_test)
+                        proba = clf.predict_proba(X_test)
+                        score = clf.score(X_test, y_test)
+                        # print(f"accuracy = {score}")
+                        accuracy_each_position.append(score)
+                        accracy_all.append(score)
 
-                                            # ==== 基本パラメータ ====
-                                            fs = int(1 / np.mean(np.diff(time)))  # サンプリング周波数
+                        # ============= normal =============
+                        for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
+                            tmp_X = segment_time_series(emg_test_8x8, window=window, hop=hop)  # (n_windows, window, 6, 6)
+                            tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 64)  # (n_windows, window, 36) #
+                            rms = [rms_feat(x) for x in tmp_X]
+                            wl = [waveform_length(x) for x in tmp_X]
+                            zc = [zero_crossings(x, threshold) for x in tmp_X]
+                            ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
+                            wamp = [wamp_feat(x, threshold2) for x in tmp_X]
+                            # td_psd = [td_psd_multichannel(x, fs=2048, mode="vector") for x in tmp_X]
+                            # td_psd = np.array(td_psd)
+                            # f1 = td_psd[:,:,0]
+                            # f2 = td_psd[:,:,1]
+                            # f3 = td_psd[:,:,2]
+                            # f4 = td_psd[:,:,3]
+                            # f5 = td_psd[:,:,4]
+                            # f6 = td_psd[:,:,5]
+                            # td_psd = td_psd.reshape(td_psd.shape[0], -1)
+                            # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
+                            tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
+                            # tmp_X = rms
+                            n_windows = len(tmp_X)
+                            # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
+                            tmp_y = [int(label)-1 for i in range(n_windows)]
 
-                                            filtered_emg = butter_bandpass_filter(emg_data, fs=fs, low_hz=20.0, high_hz=400.0, order=4)
-                                            emg_data = filtered_emg.T.reshape(-1,8,8)  # shape: (time, 64)
-                                            
-                                            # 移動
-                                            mapper = GridSubsetMapper(spacing=spacing, rotate_about=rotate_about)
-                                            tmp_X = mapper.transform(emg_data, dx=session[0], dy=session[1], theta=session[2], mode=mode)  # (n,6,6)
+                            if len(tmp_y) != len(tmp_X):
+                                raise ValueError(f"y_train length ({len(y_train)}) must match number of windows ({len(X)})")
+                            
+                            if i ==0:
+                                X_test = tmp_X
+                                y_test = tmp_y
+                            else:
+                                X_test = np.vstack([X_test, tmp_X])
+                                y_test = np.hstack([y_test, tmp_y])
 
-                                            tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 6, 6)
-                                            tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
-
-                                            if feature_name == "rms":
-                                                feature = [rms_feat(x) for x in tmp_X]
-                                            elif feature_name == "wl":
-                                                feature = [waveform_length(x) for x in tmp_X]
-                                            elif feature_name == "zc":
-                                                feature = [zero_crossings(x, threshold) for x in tmp_X]
-                                            elif feature_name == "ssc":
-                                                feature = [slope_sign_changes(x, threshold) for x in tmp_X]
-                                            elif feature_name == "wamp":
-                                                feature = [wamp_feat(x, threshold2) for x in tmp_X]
-
-                                            if i==0 and j==0 and k==0:
-                                                feature_df_r = pd.DataFrame(feature, columns=[f'ch{k+1}' for k in range(len(feature[0]))])
-                                                feature_df_r['window'] = np.arange(feature_df_r.shape[0])
-                                                feature_df_r['subject'] = subject_name
-                                                feature_df_r['electrode_place'] = electrode_place
-                                                feature_df_r['gesture'] = j+1
-                                                feature_df_r['trial'] = k+1
-                                                feature_df_r['session'] = i+1
-                                            else:
-                                                tmp_df_r = pd.DataFrame(feature, columns=[f'ch{k+1}' for k in range(len(feature[0]))])
-                                                tmp_df_r['window'] = np.arange(tmp_df_r.shape[0])
-                                                tmp_df_r['subject'] = subject_name
-                                                tmp_df_r['electrode_place'] = electrode_place
-                                                tmp_df_r['gesture'] = j+1
-                                                tmp_df_r['trial'] = k+1
-                                                tmp_df_r['session'] = i+1
-                                                feature_df_r = pd.concat([feature_df_r, tmp_df_r], axis=0)
-
-                                            # MinMaxScaler
-                                            feature_list = []
-                                            for ch in range(np.array(feature).shape[1]):
-                                                scaler = MinMaxScaler()
-                                                feature_1ch = scaler.fit_transform(np.array(feature)[:,ch].reshape(-1,1))
-                                                feature_list.append(feature_1ch)
-                                            feature = np.hstack(feature_list)
-
-                                            if i==0 and j==0 and k==0:
-                                                feature_df_icc = pd.DataFrame(feature, columns=[f'ch{k+1}' for k in range(len(feature[0]))])
-                                                feature_df_icc['window'] = np.arange(feature_df_icc.shape[0])
-                                                feature_df_icc['subject'] = subject_name
-                                                feature_df_icc['electrode_place'] = electrode_place
-                                                feature_df_icc['gesture'] = j+1
-                                                feature_df_icc['trial'] = k+1
-                                                feature_df_icc['session'] = i+1
-                                            else:
-                                                tmp_df_icc = pd.DataFrame(feature, columns=[f'ch{k+1}' for k in range(len(feature[0]))])
-                                                tmp_df_icc['window'] = np.arange(tmp_df_icc.shape[0])
-                                                tmp_df_icc['subject'] = subject_name
-                                                tmp_df_icc['electrode_place'] = electrode_place
-                                                tmp_df_icc['gesture'] = j+1
-                                                tmp_df_icc['trial'] = k+1
-                                                tmp_df_icc['session'] = i+1
-                                                feature_df_icc = pd.concat([feature_df_icc, tmp_df_icc], axis=0)
-
-                                feature_df_r_long = pd.melt(feature_df_r, id_vars=['subject', 'electrode_place', 'gesture', 'trial', 'session', 'window'],
-                                                        value_vars=[f'ch{k+1}' for k in range(36)], var_name='channel', value_name='value')
-                                feature_df_icc_long = pd.melt(feature_df_icc, id_vars=['subject', 'electrode_place', 'gesture', 'trial', 'session', 'window'],
-                                                        value_vars=[f'ch{k+1}' for k in range(36)], var_name='channel', value_name='value')
-                                    # icc = pg.intraclass_corr(data=feature_df_long, targets='window', raters='session', ratings='value')
-                                # icc2 = icc[icc['Type']=='ICC2']['ICC'].values[0]
-                                # icc2_list.append(icc2)
-                                # icc2_list_all.append(icc2)
-                                # r, p = pearsonr(feature_df_long[feature_df_long['session']==1]['value'],
-                                #     feature_df_long[feature_df_long['session']==2]['value'])
-                                # r_list.append(r)
-                                # r_list_all.append(r)
-                                warnings.simplefilter('ignore')
-                                r_list_each = []
-                                for gesture in feature_df_r_long['gesture'].unique():
-                                    for channel in feature_df_r_long['channel'].unique():
-                                        for trial in feature_df_r_long['trial'].unique():
-                                            data = feature_df_r_long[feature_df_r_long['gesture']==gesture][feature_df_r_long['channel']==channel][feature_df_r_long['trial']==trial]
-                                            data_session1 = data[data['session']==1]['value']
-                                            data_session2 = data[data['session']==2]['value']
-                                            min_len = min(len(data_session1), len(data_session2))
-                                            if min_len > 0:
-                                                r, _ = pearsonr(data_session1[:min_len], data_session2[:min_len])
-                                                r_list_each.append(r)
-                                icc2_list_each = []
-                                icc2k_list_each = []
-                                for gesture in feature_df_icc_long['gesture'].unique():
-                                    for channel in feature_df_icc_long['channel'].unique():
-                                        data = feature_df_icc_long[feature_df_icc_long['gesture']==gesture][feature_df_icc_long['channel']==channel]
-                                        icc = pg.intraclass_corr(data=data, targets='trial', raters='session', ratings='value')
-                                        icc2_value = icc[icc['Type']=='ICC2']['ICC'].values[0]
-                                        icc2k_value = icc[icc['Type']=='ICC2k']['ICC'].values[0]
-                                        if not np.isnan(icc2_value):
-                                            icc2_list_each.append(icc2_value)
-                                        if not np.isnan(icc2k_value):
-                                            icc2k_list_each.append(icc2k_value)
-                                icc2_list.append(icc2_list_each)
-                                icc2_list_all.append(icc2_list_each)
-                                icc2k_list.append(icc2k_list_each)
-                                icc2k_list_all.append(icc2k_list_each)
-                                r_list.append(r_list_each)
-                                r_list_all.append(r_list_each)
-                        except:
-                            print(f"電極配置: {electrode_place}, ジェスチャ: {gesture}, trial1: {trial1}, trial2: {trial2} でエラー")
-                            continue
-        theta_mean = np.mean(theta_list)
-        dx_mean = np.mean(dx_list)
-        dy_mean = np.mean(dy_list)
-        scale_mean = np.mean(scale_list)
-        print(f"電極配置: {electrode_place}")
-        print("平均 回転角 [deg]:", theta_mean)
-        print("平均 並進 [mm]:   dx =", dx_mean, ", dy =", dy_mean)
-        print("平均 スケール   :", scale_mean)
+                        y_pred = clf_normal.predict(X_test)
+                        proba = clf_normal.predict_proba(X_test)
+                        score = clf_normal.score(X_test, y_test)
+                        # print(f"accuracy_normal = {score}")
+                        accuracy_each_position_normal.append(score)
+                        accracy_all_normal.append(score)
+                    except:
+                        print(f"電極配置: {electrode_place}, ジェスチャ: {gesture}, trial1: {trial1}, trial2: {trial2} でエラー")
         
-        coordinate_list = [theta_list, dx_list, dy_list]
-        fig, ax = plt.subplots(figsize=(40,20), tight_layout=True)
-        ax.boxplot(coordinate_list)
-        ax.set_xticklabels(['theta','x','y'])
-        plt.title('across_trials_' + electrode_place)
-        plt.rcParams['font.size'] = 58
-        plt.grid()
-        plt.savefig('line_plot_across_trials_' + electrode_place + '.png')
-
-        if icc_r:
-            icc2_mean = np.mean(icc2_list)
-            icc2k_mean = np.mean(icc2k_list)
-            r_mean = np.mean(r_list)
-            print("平均 ICC2:", icc2_mean)
-            print("平均 ICC2k:", icc2k_mean)
-            print("平均 Pearson r:", r_mean)
-
-    theta_mean_all = np.mean(theta_list_all)
-    dx_mean_all = np.mean(dx_list_all)
-    dy_mean_all = np.mean(dy_list_all)
-    scale_mean_all = np.mean(scale_list_all)
-    print("all electrode places:")
-    print("平均 回転角 [deg]:", theta_mean_all)
-    print("平均 並進 [mm]:   dx =", dx_mean_all, ", dy =", dy_mean_all)
-    print("平均 スケール   :", scale_mean_all)
-
-    coordinate_list = [theta_list, dx_list, dy_list]
-    fig, ax = plt.subplots(figsize=(40,20), tight_layout=True)
-    ax.boxplot(coordinate_list)
-    ax.set_xticklabels(['theta','x','y'])
-    plt.title('across_trials_all electrode places')
-    plt.rcParams['font.size'] = 58
-    plt.grid()
-    plt.savefig('line_plot_across_trials_all.png')
-    
-    if icc_r:
-        icc2_mean_all = np.mean(icc2_list_all)
-        icc2k_mean_all = np.mean(icc2k_list_all)
-        r_mean_all = np.mean(r_list_all)
-        print("平均 ICC2:", icc2_mean_all)
-        print("平均 ICC2k:", icc2k_mean_all)
-        print("平均 Pearson r:", r_mean_all)
+        print(f'electrode_place: {electrode_place}')
+        print(f'accuracy_each_position: {np.mean(accuracy_each_position)}')
+        print(f'accuracy_each_position_normal: {np.mean(accuracy_each_position_normal)}')
+    print(f'accracy_all: {np.mean(accracy_all)}')
+    print(f'accracy_all_normal: {np.mean(accracy_all_normal)}')
+    print(f'average time for alignment: {np.mean(time_alignment_list)} sec')

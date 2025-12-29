@@ -225,11 +225,18 @@ def spectral_entropy(window_2d: np.ndarray, fs: float, nperseg=None, noverlap=No
 # muscle_activity_information.main(peak_frequency, func_type=True, feature_name='peakfrequency', muscle_activity_informations_measurere='gaussianfitting')
 # muscle_activity_information.main(spectral_entropy, func_type=True, feature_name='spectralentropy', muscle_activity_informations_measurere='gaussianfitting')
 
-muscle_activity_information_for_otbiodata.main(ptp, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gmm', subject_list=["yuki"])
-muscle_activity_information_for_otbiodata.main(rms, func_type=False, feature_name='rms', muscle_activity_informations_measurere='gmm', subject_list=["yuki"])
-muscle_activity_information_for_otbiodata.main(zc, func_type=False, feature_name='zc', muscle_activity_informations_measurere='gmm', subject_list=["yuki"])
-muscle_activity_information_for_otbiodata.main(waveform_length, func_type=False, feature_name='waveformlength', muscle_activity_informations_measurere='gmm', subject_list=["yuki"])
-muscle_activity_information_for_otbiodata.main(mean_frequency, func_type=True, feature_name='meanfrequency', muscle_activity_informations_measurere='gmm', subject_list=["yuki"])
-muscle_activity_information_for_otbiodata.main(median_frequency, func_type=True, feature_name='medianfrequency', muscle_activity_informations_measurere='gmm', subject_list=["yuki"])
-muscle_activity_information_for_otbiodata.main(peak_frequency, func_type=True, feature_name='peakfrequency', muscle_activity_informations_measurere='gmm', subject_list=["yuki"])
-muscle_activity_information_for_otbiodata.main(spectral_entropy, func_type=True, feature_name='spectralentropy', muscle_activity_informations_measurere='gmm', subject_list=["yuki"])
+subject = 'garu'
+# muscle_activity_information_for_otbiodata.main(ptp, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gmm', subject=subject)
+muscle_activity_information_for_otbiodata.main(rms, func_type=False, feature_name='rms', muscle_activity_informations_measurere='gmm', subject=subject, detection_type='sliding_window')
+# muscle_activity_information_for_otbiodata.main(zc, func_type=False, feature_name='zc', muscle_activity_informations_measurere='gmm', subject=subject)
+# muscle_activity_information_for_otbiodata.main(waveform_length, func_type=False, feature_name='waveformlength', muscle_activity_informations_measurere='gmm', subject=subject)
+# muscle_activity_information_for_otbiodata.main(mean_frequency, func_type=True, feature_name='meanfrequency', muscle_activity_informations_measurere='gmm', subject=subject)
+# muscle_activity_information_for_otbiodata.main(median_frequency, func_type=True, feature_name='medianfrequency', muscle_activity_informations_measurere='gmm', subject=subject)
+# muscle_activity_information_for_otbiodata.main(peak_frequency, func_type=True, feature_name='peakfrequency', muscle_activity_informations_measurere='gmm', subject=subject)
+# muscle_activity_information_for_otbiodata.main(spectral_entropy, func_type=True, feature_name='spectralentropy', muscle_activity_informations_measurere='gmm', subject=subject)
+
+subject = 'yuki'
+# muscle_activity_information_for_otbiodata.main(ptp, func_type=False, feature_name='ptp', muscle_activity_informations_measurere='gmm', subject=subject)
+# muscle_activity_information_for_otbiodata.main(rms, func_type=False, feature_name='rms', muscle_activity_informations_measurere='gmm', subject=subject)
+# muscle_activity_information_for_otbiodata.main(zc, func_type=False, feature_name='zc', muscle_activity_informations_measurere='gmm', subject=subject)
+# muscle_activity_information_for_otbiodata.main(waveform_length, func_type=False, feature_name='waveformlength', muscle_activity_informations_measurere='gmm', subject=subject)

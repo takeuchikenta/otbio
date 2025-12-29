@@ -42,12 +42,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 import evaluation_across_trials
 import evaluation_across_sessions
 
-evaluation_across_trials.main(feature_name_for_filename = "ptp", normalize = True)
-evaluation_across_trials.main(feature_name_for_filename = "rms", normalize = True)
-evaluation_across_trials.main(feature_name_for_filename = "zc", normalize = True)
-evaluation_across_trials.main(feature_name_for_filename = "waveformlength", normalize = True)
+dir = 'output/garu/otbio_test2_garu_'
+# evaluation_across_sessions.main(dir = dir, subject='garu', feature_name_for_filename = "ptp")
+evaluation_across_sessions.main(dir = dir, subject='garu', feature_name_for_filename = "rms")
+# evaluation_across_sessions.main(dir = dir, subject='garu', feature_name_for_filename = "zc")
+# evaluation_across_sessions.main(dir = dir, subject='garu', feature_name_for_filename = "waveformlength")
 
-evaluation_across_sessions.main(feature_name_for_filename = "ptp", normalize = True)
-evaluation_across_sessions.main(feature_name_for_filename = "rms", normalize = True)
-evaluation_across_sessions.main(feature_name_for_filename = "zc", normalize = True)
-evaluation_across_sessions.main(feature_name_for_filename = "waveformlength", normalize = True)
+# evaluation_across_trials.main(dir = dir, subject='garu', feature_name_for_filename = "ptp")
+evaluation_across_trials.main(dir = dir, subject='garu', feature_name_for_filename = "rms")
+# evaluation_across_trials.main(dir = dir, subject='garu', feature_name_for_filename = "zc")
+# evaluation_across_trials.main(dir = dir, subject='garu', feature_name_for_filename = "waveformlength")
+

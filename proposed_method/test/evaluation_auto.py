@@ -41,13 +41,19 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 import evaluation_across_trials
 import evaluation_across_sessions
+import evaluation_across_sessions_hyser
 
-# evaluation_across_trials.main(feature_name_for_filename = "ptp")
-# evaluation_across_trials.main(feature_name_for_filename = "rms")
-# evaluation_across_trials.main(feature_name_for_filename = "zc")
-# evaluation_across_trials.main(feature_name_for_filename = "waveformlength")
+dir = 'output/garu/otbio_test4_slidingwindow_garu_'
+# evaluation_across_sessions.main(dir = dir, subject='garu', feature_name_for_filename = "ptp", registration='itk')
+evaluation_across_sessions.main(dir = dir, subject='garu', feature_name_for_filename = "rms", registration='sizefixedorb', icc_r=True)
+# evaluation_across_sessions.main(dir = dir, subject='garu', feature_name_for_filename = "zc", registration='itk')
+# evaluation_across_sessions.main(dir = dir, subject='garu', feature_name_for_filename = "waveformlength", registration='itk')
 
-evaluation_across_sessions.main(feature_name_for_filename = "ptp")
-evaluation_across_sessions.main(feature_name_for_filename = "rms")
-evaluation_across_sessions.main(feature_name_for_filename = "zc")
-evaluation_across_sessions.main(feature_name_for_filename = "waveformlength")
+# evaluation_across_trials.main(dir = dir, subject='garu', feature_name_for_filename = "ptp", registration='itk')
+evaluation_across_trials.main(dir = dir, subject='garu', feature_name_for_filename = "rms", registration='sizefixedorb', icc_r=True)
+# evaluation_across_trials.main(dir = dir, subject='garu', feature_name_for_filename = "zc", registration='itk')
+# evaluation_across_trials.main(dir = dir, subject='garu', feature_name_for_filename = "waveformlength", registration='itk')
+
+
+# dir = 'output/features_for_hyser/test1_'
+# evaluation_across_sessions_hyser.main(dir = dir, subject=1, feature_name_for_filename = "rms")
