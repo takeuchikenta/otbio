@@ -1167,6 +1167,8 @@ def segment_time_series(emg_6x6: np.ndarray, window: int, hop: int) -> np.ndarra
     return segs
 
 
+
+
 # === main ===
 def main(subject="takeuchi", registration='affine', icc_r = False):
     print("セッション間")
@@ -1683,7 +1685,7 @@ def main(subject="takeuchi", registration='affine', icc_r = False):
 
 
                         if icc_r:
-                            feature_name = "rms"
+                            feature_name = "wl"
                             subject_name = subject
 
                             window = 200
@@ -1861,6 +1863,7 @@ def main(subject="takeuchi", registration='affine', icc_r = False):
             ax.set_xticklabels(['theta','x','y'])
             plt.title('across_session_gesture' + str(gesture) + '_' + electrode_place)
             plt.rcParams['font.size'] = 58
+            plt.ylim([-15,15])
             plt.grid()
             plt.savefig('line_plot_across_sessions_' + subject + '_gesture' + str(gesture) + '_' + electrode_place + '.png')
             # plt.show()
@@ -1879,6 +1882,7 @@ def main(subject="takeuchi", registration='affine', icc_r = False):
         ax.set_xticklabels(['theta','x','y'])
         plt.title('across_session_' + electrode_place)
         plt.rcParams['font.size'] = 58
+        plt.ylim([-15,15])
         plt.grid()
         plt.savefig('line_plot_across_sessions_' + subject + '_' + electrode_place + '.png')
         # plt.show()
@@ -1906,6 +1910,7 @@ def main(subject="takeuchi", registration='affine', icc_r = False):
     ax.set_xticklabels(['theta','x','y'])
     plt.title('across_session_all electrode places')
     plt.rcParams['font.size'] = 58
+    plt.ylim([-15,15])
     plt.grid()
     plt.savefig('line_plot_across_sessions_' + subject + '_all.png')
     # plt.show()

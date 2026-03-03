@@ -11,7 +11,7 @@ from scipy.signal import butter, filtfilt, iirnotch, sosfiltfilt, cheb2ord, cheb
 from sklearn.decomposition import FastICA
 from scipy.interpolate import RectBivariateSpline
 from scipy import interpolate
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, median_filter
 from scipy.optimize import curve_fit
 from scipy.signal import welch
 from sklearn.cluster import KMeans
@@ -41,6 +41,7 @@ from scipy.optimize import linear_sum_assignment, minimize
 import warnings
 np.warnings = warnings
 import torch
+import torch.optim as optim
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 import glmdtps
@@ -81,6 +82,15 @@ def butter_bandpass_filter(x, fs: float, low_hz: float, high_hz: float, order: i
     y = sosfiltfilt(sos, x2, axis=0)
     return y.ravel() if was_1d else y
 
+
+# ----- ガウス関数定義 -----
+def gaussian_2d(coord, A, x0, y0, sigma_x, sigma_y, theta, offset):
+    x, y = coord #coord[:, 0], coord[:, 1]
+    a = (np.cos(theta)**2) / (2*sigma_x**2) + (np.sin(theta)**2) / (2*sigma_y**2)
+    b = -(np.sin(2*theta)) / (4*sigma_x**2) + (np.sin(2*theta)) / (4*sigma_y**2)
+    c = (np.sin(theta)**2) / (2*sigma_x**2) + (np.cos(theta)**2) / (2*sigma_y**2)
+    return A * np.exp(-(a*(x - x0)**2 + 2*b*(x - x0)*(y - y0) + c*(y - y0)**2)) + offset
+
 def remove_power_line_harmonics(data, fs, fundamental=60.0, Q=30.0):
     # 出力用データのコピー
     filtered_data = data.copy()
@@ -106,15 +116,6 @@ def remove_power_line_harmonics(data, fs, fundamental=60.0, Q=30.0):
         filtered_data = signal.filtfilt(b, a, filtered_data, axis=0)
         
     return filtered_data
-
-# ----- ガウス関数定義 -----
-def gaussian_2d(coord, A, x0, y0, sigma_x, sigma_y, theta, offset):
-    x, y = coord #coord[:, 0], coord[:, 1]
-    a = (np.cos(theta)**2) / (2*sigma_x**2) + (np.sin(theta)**2) / (2*sigma_y**2)
-    b = -(np.sin(2*theta)) / (4*sigma_x**2) + (np.sin(2*theta)) / (4*sigma_y**2)
-    c = (np.sin(theta)**2) / (2*sigma_x**2) + (np.cos(theta)**2) / (2*sigma_y**2)
-    return A * np.exp(-(a*(x - x0)**2 + 2*b*(x - x0)*(y - y0) + c*(y - y0)**2)) + offset
-
 
 # ------ 時間領域の特徴量 -----
 def waveform_length(signal):
@@ -1376,8 +1377,173 @@ def objective_ncc(params, ref, mov):
     return 1 - ncc(ref, warped)
 
 
-import time
+#===========================================
+# Prototypical Adaptation
+#===========================================
 
+# ==========================================
+# 1. 前処理と特徴量抽出 
+# ==========================================
+
+def extract_wl_feature_map(window_data):
+    """
+    Waveform Length (WL) を抽出し、8x8のマップとして返す
+    Input: (Time, Channels_Flat)
+    Output: (8, 8) Feature Map
+    """
+    # 1. 各チャンネルのWLを計算 (Flat)
+    wl_flat = np.sum(np.abs(np.diff(window_data, axis=0)), axis=0)
+    
+    # 2. 空間配置 (8x8) にリシェイプ
+    # データセットの並び順に依存しますが、ここでは一般的な8x8配列と仮定
+    wl_map = wl_flat.reshape(8, 8)
+    
+    return wl_map
+
+def apply_median_filter(feature_map, kernel_size=3):
+    """
+    論文 Eq.(2) に基づくメディアンフィルタ
+    Input: (8, 8)
+    Output: (8, 8)
+    """
+    # 3x3 カーネルでフィルタリング [cite: 976]
+    filtered_map = median_filter(feature_map, size=kernel_size, mode='reflect')
+    return filtered_map
+
+def prepare_data_indices(n_trials, n_time, fs, is_support_set=False, shot_trial_idx=0):
+    """
+    修正: shot_trial_idx (0~4) を引数に追加
+    
+    shot_trial_idx: 0始まりのインデックス。0なら1施行目、4なら5施行目を指定。
+    """
+    # 全データ形状: (35トライアル, 6000サンプル, 8, 8)
+    # 35トライアル = 7ジェスチャー * 5施行
+    trials_per_gesture = 5
+    n_gestures = 7
+    
+    indices = []
+    
+    # バリデーション: インデックスが範囲内か確認
+    if not (0 <= shot_trial_idx < trials_per_gesture):
+        raise ValueError(f"shot_trial_idx must be between 0 and {trials_per_gesture - 1}")
+
+    for g in range(n_gestures):
+        start_trial_idx = g * trials_per_gesture
+        
+        # ターゲットとなる試行の全体インデックス
+        target_idx = start_trial_idx + shot_trial_idx
+        
+        if is_support_set:
+            # 修正: 指定された shot_trial_idx の試行のみを選択
+            # さらに「最初の1秒間」のみ使用
+            trial_indices = [target_idx] 
+            time_limit = 2000 
+        else:
+            # 修正: 指定された shot_trial_idx 「以外」の残りの施行を選択
+            # 全試行インデックスのリストを作成
+            all_indices = list(range(start_trial_idx, start_trial_idx + trials_per_gesture))
+            # ターゲットを除外
+            all_indices.remove(target_idx)
+            
+            trial_indices = all_indices
+            time_limit = n_time # 最後まで使う
+            
+        indices.append((g, trial_indices, time_limit))
+            
+    return indices
+
+def create_dataset(emg_list, y_list, fs=2000, window_ms=200, step_ms=50, mode='full', shot_trial_idx=0):
+    """
+    データセット作成関数 (修正: 特徴抽出後にメディアンフィルタ適用)
+    """
+    data = np.array(emg_list) # (35, 6000, 8, 8)
+    n_trials, n_time, _, _ = data.shape
+    # チャンネルをフラット化して処理
+    data = data.reshape(n_trials, n_time, -1)
+    
+    window_samples = int((window_ms / 1000) * fs)
+    step_samples = int((step_ms / 1000) * fs)
+    
+    X_feat = []
+    y_labels = []
+    
+    if mode == 'full':
+        target_config = [(g, range(g*5, (g+1)*5), n_time) for g in range(7)]
+    elif mode == 'support':
+        target_config = prepare_data_indices(5, n_time, fs, is_support_set=True, shot_trial_idx=shot_trial_idx)
+    elif mode == 'query':
+        target_config = prepare_data_indices(5, n_time, fs, is_support_set=False, shot_trial_idx=shot_trial_idx)
+    
+    for gesture_label, trial_indices, time_limit in target_config:
+        for t_idx in trial_indices:
+            trial_data = data[t_idx]
+            limit = min(time_limit, trial_data.shape[0])
+            valid_data = trial_data[:limit, :]
+            
+            for start in range(0, limit - window_samples + 1, step_samples):
+                end = start + window_samples
+                window = valid_data[start:end, :]
+                
+                # --- 変更箇所: 特徴抽出 -> フィルタ -> フラット化 ---
+                
+                # 1. WL特徴量マップ抽出 (8x8)
+                feat_map = extract_wl_feature_map(window)
+                
+                # 2. メディアンフィルタ適用 [cite: 968]
+                feat_map_filtered = apply_median_filter(feat_map, kernel_size=3)
+                
+                # 3. フラット化してリストに追加
+                feat_flat = feat_map_filtered.flatten()
+                
+                X_feat.append(feat_flat)
+                y_labels.append(gesture_label)
+
+    # 正規化のため、以下を追加
+    X_feat = np.array(X_feat)
+    y_labels = np.array(y_labels)
+
+    # 各列(チャネル)ごとに正規化を行います。
+    if len(X_feat) > 0:
+        scaler = StandardScaler()
+        X_feat = scaler.fit_transform(X_feat)
+                
+    return X_feat, y_labels
+    # return np.array(X_feat), np.array(y_labels)
+
+# ==========================================
+# 2. モデル定義 
+# ==========================================
+
+class ProtoNet(nn.Module):
+    def __init__(self, input_dim):
+        super(ProtoNet, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        )
+        
+    def forward(self, x):
+        return self.net(x)
+
+def euclidean_dist(x, prototypes):
+    n = x.size(0)
+    m = prototypes.size(0)
+    d = x.size(1)
+    x = x.unsqueeze(1).expand(n, m, d)
+    prototypes = prototypes.unsqueeze(0).expand(n, m, d)
+    return torch.pow(x - prototypes, 2).sum(2)
+
+def warp_emg(emg_list, tx, ty, theta, sx, sy, shear):
+    emg_list_warped = []
+    for emg_test_8x8 in emg_list:
+        tmp_X = warp_batch_images(emg_test_8x8, tx, ty, theta, sx, sy, shear)
+        emg_list_warped.append(tmp_X)
+    return emg_list_warped
+
+import time
 
 # === main ===
 def main(subject='nojima'):
@@ -1429,9 +1595,9 @@ def main(subject='nojima'):
         tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
 
         # ========= チャネルごとに正規化 =========
-        mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-        std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-        tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
+        mean = np.mean(tmp_X.reshape(-1,8,8), axis=0)
+        std = np.std(tmp_X.reshape(-1,8,8), axis=0) + 1e-8
+        tmp_X = (tmp_X - mean.reshape(1, 1, 8, 8)) / std.reshape(1, 1, 8, 8)
         # ====================================
 
         # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
@@ -1445,12 +1611,12 @@ def main(subject='nojima'):
         wamp = [wamp_feat(x, threshold2) for x in tmp_X]
         td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
         td_psd = np.array(td_psd)
-        f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-        f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-        f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-        f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-        f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-        f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
+        f1 = td_psd[:,:,0].reshape(-1,8,8)
+        f2 = td_psd[:,:,1].reshape(-1,8,8)
+        f3 = td_psd[:,:,2].reshape(-1,8,8)
+        f4 = td_psd[:,:,3].reshape(-1,8,8)
+        f5 = td_psd[:,:,4].reshape(-1,8,8)
+        f6 = td_psd[:,:,5].reshape(-1,8,8)
         # td_psd = td_psd.reshape(td_psd.shape[0], -1)
         # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
         # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
@@ -1475,13 +1641,6 @@ def main(subject='nojima'):
             y_train = np.hstack([y_train, tmp_y])
 
     X_train_aligment = X_train
-    # 学習
-    X_train_nonclopped = X_train
-    X_train_nonclopped = X_train_nonclopped.reshape(-1, 8*8)
-
-    clf = LinearDiscriminantAnalysis()
-    clf.fit(X_train_nonclopped, y_train)
-
     # 学習時のアライメントマップ平均を1秒毎に計算し、３秒間で平均(補間なし)
     gestures = np.unique(y_train) + 1
     train_trial_alignment_maps_without_interp_1sec = []
@@ -1498,11 +1657,58 @@ def main(subject='nojima'):
                 z_list = []
                 i = 0
         train_trial_alignment_maps_without_interp_1sec.append(trial_list)
+    
 
-    # ==============位置合わせ=============#
+    # 学習時のアライメントマップ平均を時間窓毎に計算 (補間なし)
+    train_window_alignment_maps = []
+    for gesture in gestures:
+        z_list = []
+        iterator = X_train_aligment[y_train==gesture-1]
+        for tmp_X_train_aligment in iterator[:]:
+            z_list.append(tmp_X_train_aligment)
+        train_window_alignment_maps.append(z_list)
+
+    # --- A. データセット作成 ---
+    print("Processing Training Data (with Median Filter)...")
+    X_train, y_train = create_dataset(emg_list_train, y_list_train, fs=2000, window_ms=200, step_ms=50, mode='full')
+    # Tensor変換
+    X_train_t = torch.FloatTensor(X_train)
+    y_train_t = torch.LongTensor(y_train)
+    # --- C. モデル学習 (Source Domain) ---
+    model = ProtoNet(input_dim=X_train.shape[1])
+    optimizer = optim.Adam(model.parameters(), lr=0.0005)
+    n_epochs = 300
+    n_classes = 7
+
+    print("\nTraining Embedding Network...")
+    model.train()
+    for epoch in range(n_epochs):
+        embeddings = model(X_train_t)
+        prototypes = []
+        for c in range(n_classes):
+            mask = (y_train_t == c)
+            if mask.sum() > 0:
+                prototypes.append(embeddings[mask].mean(0))
+            else:
+                prototypes.append(torch.zeros(128))
+        prototypes = torch.stack(prototypes)
+        
+        dists = euclidean_dist(embeddings, prototypes)
+        log_p_y = torch.log_softmax(-dists, dim=1)
+        loss = -log_p_y.gather(1, y_train_t.view(-1, 1)).mean()
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        if (epoch+1) % 50 == 0:
+            print(f"Epoch {epoch+1}/{n_epochs}, Loss: {loss.item():.4f}")
+
+
+    # ==============位置合わせ + 適応 + 推論=============#
     accracy_all = []
-    accracy_all_normal = []
     time_alignment_list = []
+    time_adaptation_list = []
     for electrode_place in ["original2"]:#["downleft5mm", "downleft10mm", "clockwise"]:
         print(f'electrode_place: {electrode_place}')
         # ずれデータ
@@ -1522,7 +1728,6 @@ def main(subject='nojima'):
 
                     # ==== 基本パラメータ ====
                     fs = int(1 / np.mean(np.diff(time_emg)))  # サンプリング周波数
-
                     emg_data = remove_power_line_harmonics(emg_data, fs=fs, fundamental=60.0, Q=30.0)
                     filtered_emg = butter_bandpass_filter(emg_data, fs=fs, low_hz=20.0, high_hz=450.0, order=4)
                     emg_data = filtered_emg.reshape(-1,8,8)  # shape: (time, 64)
@@ -1603,7 +1808,7 @@ def main(subject='nojima'):
                     z_list = []
                     i = 0
             test_trial_alignment_maps_without_interp_1sec.append(trial_list)
-
+ 
         #-----------------------------------------
         # 位置合わせ
         #-----------------------------------------
@@ -1650,73 +1855,45 @@ def main(subject='nojima'):
                     sy = sy
                     shear = shear
                     # ==============推論フェーズ=============#
-                    j = 0
-                    for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
-                        # 位置合わせに使用したtrialは無視
-                        if (i+1) % 5 == trial:
-                            continue
-                        tmp_X = warp_batch_images(emg_test_8x8, tx, ty, theta, sx, sy, shear)
-                        tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
+                    emg_list_warped = warp_emg(emg_list_test, tx,ty,theta,sx,sy,shear)
+                    # print("Processing Test Data (One-Shot Split)...")
+                    X_test_support, y_test_support = create_dataset(emg_list_warped, y_list_test, mode='support', shot_trial_idx=trial-1)
+                    X_test_query, y_test_query = create_dataset(emg_list_warped, y_list_test, mode='query', shot_trial_idx=trial-1)
 
-                        # ========= チャネルごとに正規化 =========
-                        mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-                        std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-                        tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
-                        # ====================================
+                    X_support_t = torch.FloatTensor(X_test_support)
+                    y_support_t = torch.LongTensor(y_test_support)
+                    X_query_t = torch.FloatTensor(X_test_query)
+                    y_query_t = torch.LongTensor(y_test_query)
 
-                        # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
-
-                        # 特徴量抽出
-                        ptp = [ptp_feat(x) for x in tmp_X]
-                        rms = [rms_feat(x) for x in tmp_X]
-                        wl = [waveform_length(x) for x in tmp_X]
-                        zc = [zero_crossings(x, threshold) for x in tmp_X]
-                        ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
-                        wamp = [wamp_feat(x, threshold2) for x in tmp_X]
-                        td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
-                        td_psd = np.array(td_psd)
-                        f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-                        f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-                        f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-                        f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-                        f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-                        f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
-                        # td_psd = td_psd.reshape(td_psd.shape[0], -1)
-                        # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
-                        # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
-                        # tmp_X = rms
-                        # tmp_X = np.stack([rms, wl, zc], axis=1)
-                        # tmp_X = np.stack([wl, rms, zc], axis=1)
-                        tmp_X = wl
-                        # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
-                        n_windows = len(tmp_X)
-                        # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
-                        tmp_y = [int(label)-1 for i in range(n_windows)]
-                        sizes_te.append(n_windows)
-
-                        if len(tmp_y) != len(tmp_X):
-                            raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
+                    # --- D. One-Shot 推論 (Target Domain) ---
+                    # print("\nPerforming One-Shot Adaptation...")
+                    model.eval()
+                    with torch.no_grad():
+                        # サポートセットでプロトタイプ計算
+                        start_adap = time.time()
+                        support_embeddings = model(X_support_t)
+                        new_prototypes = []
+                        for c in range(n_classes):
+                            mask = (y_support_t == c)
+                            if mask.sum() > 0:
+                                new_prototypes.append(support_embeddings[mask].mean(0))
+                            else:
+                                new_prototypes.append(torch.zeros(128))
+                        new_prototypes = torch.stack(new_prototypes)
+                        end_adap = time.time()
+                        time_adaptation_list.append(end_adap - start_adap)
                         
-                        if j == 0:
-                            X_test = tmp_X
-                            y_test = tmp_y
-                        else:
-                            X_test = np.vstack([X_test, tmp_X])
-                            y_test = np.hstack([y_test, tmp_y])
-                        
-                        j += 1
+                        # クエリセットで評価
+                        query_embeddings = model(X_query_t)
+                        dists = euclidean_dist(query_embeddings, new_prototypes)
+                        y_pred = torch.argmin(dists, dim=1)
+                        score = (y_pred == y_query_t).float().mean().item()
 
-                    # 推論
-                    X_test_nonclopped = X_test.reshape(-1, 8*8)
-                    y_pred = clf.predict(X_test_nonclopped)
-                    proba = clf.predict_proba(X_test_nonclopped)
-                    score = clf.score(X_test_nonclopped, y_test)
                     accuracy_each_gesture_alignment.append(score)
                     accuracy_each_position.append(score)
                     accracy_all.append(score)
-                # except:
-                #     print(f"電極配置: {electrode_place}, ジェスチャ: {gesture}, trial1: {trial1}, trial2: {trial2} でエラー")
             print(f'accuracy of gesture{gesture}: {np.mean(accuracy_each_gesture_alignment)}')
         print(f'accuracy of {electrode_place}: {np.mean(accuracy_each_position)}')
     print(f'accracy_all: {np.mean(accracy_all)}')
     print(f'average time for alignment: {np.mean(time_alignment_list)} sec')
+    print(f'average time for adoptation: {np.mean(time_adaptation_list)} sec')

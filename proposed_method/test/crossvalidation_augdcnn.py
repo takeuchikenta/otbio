@@ -1356,13 +1356,44 @@ def warp_batch_images(batch_data, tx, ty, theta, sx, sy, shear):
     return result_data
 
 # 目的関数
-def ncc(a, b):
-    if np.std(a) == 0 or np.std(b) == 0: return 0.0
-    a_mean = a - np.mean(a)
-    b_mean = b - np.mean(b)
-    num = np.sum(a_mean * b_mean)
-    den = np.sqrt(np.sum(a_mean**2)) * np.sqrt(np.sum(b_mean**2)) + 1e-8
-    return float(num / den)
+from scipy.ndimage import gaussian_filter
+
+def preprocess_wl(img: np.ndarray, sigma: float = 0.5) -> np.ndarray:
+    """
+    WLマップの前処理: 対数変換で非線形性を緩和し、ガウシアンで高周波ノイズを除去。
+    """
+    # log(1+x)でゼロ除算回避しつつ対数変換
+    img_log = np.log1p(img)
+    return gaussian_filter(img_log, sigma=sigma)
+
+def calc_ngc(img1: np.ndarray, img2: np.ndarray, eps: float = 1e-8) -> float:
+    """
+    正規化勾配相関 (NGC) を計算。
+    値は [-1, 1] の範囲。1に近いほど勾配の向きと強度の分布が一致。
+    """
+    # 1. 勾配の計算 (中央差分)
+    # g1_y, g1_x = np.gradient(img1) # 行列サイズが大きい場合
+    # 行列サイズが小さいHD-sEMG(例:8x16)ではSobelの方が安定する場合があるが、gradientで十分
+    img1 = cv2.GaussianBlur(img1,(3,3),0)
+    img2 = cv2.GaussianBlur(img2,(3,3),0)
+
+    dy1, dx1 = np.gradient(img1)
+    dy2, dx2 = np.gradient(img2)
+
+    # 2. 各点での勾配ベクトルの内積 (Numerator)
+    # A . B = |A||B|cos(theta)
+    dot_product = (dx1 * dx2) + (dy1 * dy2)
+
+    # 3. 勾配の大きさ (Magnitude)
+    mag1_sq = dx1**2 + dy1**2
+    mag2_sq = dx2**2 + dy2**2
+
+    # 4. 全体の相関を計算 (Global NGC)
+    # 分母: 全エネルギーの平方根の積 (Cauchy-Schwarz)
+    numerator = np.sum(dot_product)
+    denominator = np.sqrt(np.sum(mag1_sq)) * np.sqrt(np.sum(mag2_sq))
+
+    return numerator / (denominator + eps)
 
 def affine_transform(img, params):
     a, b, c, d, tx, ty = params
@@ -1371,13 +1402,463 @@ def affine_transform(img, params):
     h, w = img.shape
     return cv2.warpAffine(img, M, (w, h))
 
-def objective_ncc(params, ref, mov):
+def objective_ngc(params, ref, mov):
     warped = affine_transform(mov, params)
-    return 1 - ncc(ref, warped)
+    return 1 - calc_ngc(ref, warped)
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import numpy as np
+
+# --- 1. モデル定義 (Encoder) ---
+class EMGEncoder(nn.Module):
+    """
+    HD-sEMG画像から特徴ベクトルを抽出するネットワーク
+    """
+    def __init__(self, input_dim=1, hidden_dim=64, output_dim=64):
+        super(EMGEncoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(input_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(hidden_dim, output_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(output_dim),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)) # どんなサイズでも 1x1 にする
+        )
+        
+    def forward(self, x):
+        x = self.encoder(x)
+        return x.view(x.size(0), -1)
+
+# --- 2. 距離計算などのユーティリティ ---
+def compute_prototypes(embeddings, labels, n_way):
+    """
+    サポートセット(適応データ)からプロトタイプを計算する関数
+    """
+    prototypes = []
+    for c in range(n_way):
+        # クラスcに属するデータの平均をとる
+        mask = (labels == c)
+        if mask.sum() > 0:
+            p = embeddings[mask].mean(0)
+            prototypes.append(p)
+        else:
+            # 万が一データがない場合はゼロベクトルなどを入れる（エラー回避）
+            prototypes.append(torch.zeros_like(embeddings[0]))
+    return torch.stack(prototypes)
+
+def euclidean_metric(query, prototypes):
+    """
+    クエリとプロトタイプ間のユークリッド距離を計算
+    """
+    n = query.size(0)
+    m = prototypes.size(0)
+    d = query.size(1)
+    
+    query = query.unsqueeze(1).expand(n, m, d)
+    prototypes = prototypes.unsqueeze(0).expand(n, m, d)
+    
+    # 距離の二乗（Squared Euclidean Distance）
+    dists = torch.pow(query - prototypes, 2).sum(2)
+    return dists
+
+def preprocess_ndarray(x, y):
+    # 1. Tensorに変換
+    x_tensor = torch.from_numpy(x)
+    y_tensor = torch.from_numpy(y)
+    
+    # 2. チャネル次元の追加 (Batch, Height, Width) -> (Batch, Channel, Height, Width)
+    # CNNは4次元入力を期待するため、2番目に次元を追加します
+    x_tensor = x_tensor.unsqueeze(1) 
+    
+    return x_tensor, y_tensor
+
+#== DCNN用オフラインデータ拡張＋前処理ユーティリティ ===
+
+import numpy as np
+from typing import Tuple, Optional
+from scipy.ndimage import median_filter, shift as ndi_shift
+from skimage.transform import resize
+
+# ---------- 基本処理 ----------
+def apply_median_3ch(x3: np.ndarray, ksize: int = 3) -> np.ndarray:
+    # x3: (3, H, W)
+    return np.stack([median_filter(x3[c], size=ksize) for c in range(3)], axis=0)
+
+def interp_resize_3ch(x3: np.ndarray, out_hw: Tuple[int, int]) -> np.ndarray:
+    Hout, Wout = out_hw
+    out = [resize(x3[c], (Hout, Wout), order=3, preserve_range=True, anti_aliasing=True) for c in range(3)]
+    return np.stack(out, axis=0).astype(np.float32)
+
+# （新規）複製で埋める並進
+def shift_replicate(x3: np.ndarray, dx: int, dy: int) -> np.ndarray:
+    # x3: (3,H,W) / mode='nearest' で境界を複製して埋める
+    return np.stack(
+        [ndi_shift(x3[c], shift=(dy, dx), mode='nearest', order=1, prefilter=False) for c in range(3)],
+        axis=0
+    ).astype(np.float32)
+
+def add_white_noise_snr(x3: np.ndarray, snr_db: float = 25.0) -> np.ndarray:
+    sig_pow = np.mean(x3**2)
+    noise_pow = sig_pow / (10**(snr_db/10))
+    noise = np.random.normal(0, np.sqrt(noise_pow + 1e-12), size=x3.shape).astype(np.float32)
+    return (x3 + noise).astype(np.float32)
+
+# （置き換え）オフライン拡張は並進のみ
+def offline_augment_once(x3: np.ndarray, max_shift: int = 1, snr_db: Optional[float] = 25.0, **kwargs) -> np.ndarray:
+    dx = np.random.randint(-max_shift, max_shift + 1)
+    dy = np.random.randint(-max_shift, max_shift + 1)
+    y = shift_replicate(x3, dx, dy)
+    if snr_db is not None:
+        y = add_white_noise_snr(y.astype(np.float32), snr_db=snr_db)
+    return y.astype(np.float32)
+
+# ---------- 正規化（学習統計のみでz-score） ----------
+def fit_channel_stats(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    # X: (N,3,H,W) -> (3,1,1)
+    mean = X.mean(axis=(0,2,3), keepdims=True)
+    std  = X.std(axis=(0,2,3), keepdims=True) + 1e-8
+    return mean, std
+
+def apply_channel_norm(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    return ((X - mean) / std).astype(np.float32)
+
+# ---------- 一括ビルド：メディアン→補間→(増強M回) ----------
+def build_offline_dataset(
+    X: np.ndarray,  # (N,C,H,W)
+    y: np.ndarray,           # (N,)
+    out_hw: Tuple[int,int] = (36,36),
+    median_ksize: int = 3,
+    M: int = 1,              # 1サンプルから何個“追加”で増やすか（合計M+1個）
+    aug_shift: int = 1,
+    aug_snr_db: Optional[float] = 25.0,
+    seed: int = 42
+):
+    rng = np.random.default_rng(seed)
+    np.random.seed(seed)
+
+    N = X.shape[0]
+    X_list, y_list = [], []
+    for i in range(N):
+        x3 = X[i].astype(np.float32)  # (C,H,W)
+        # オフライン画像処理（モデル外）
+        x3 = apply_median_3ch(x3, ksize=median_ksize)
+        x3 = interp_resize_3ch(x3, out_hw)
+        # 元データを格納
+        X_list.append(x3); y_list.append(y[i])
+        # オフライン拡張をM個 生成
+        for _ in range(M):
+            xa = offline_augment_once(x3, max_shift=aug_shift, snr_db=aug_snr_db)
+            X_list.append(xa); y_list.append(y[i])
+
+    X_aug = np.stack(X_list).astype(np.float32)   # (N*(M+1), 3, Hout, Wout)
+    y_aug = np.asarray(y_list, dtype=np.int64)
+    return X_aug, y_aug
+
+# === Dilated CNN (DCNN) implementation in PyTorch ===
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+
+# -------------------------------
+# SRダウンサンプリング: Anti-aliasing + APS
+# -------------------------------
+def _binomial_filter_1d(m: int) -> torch.Tensor:
+    # m=1..9 の二項係数（TIM論文の設定）
+    import math
+    coeff = [math.comb(m-1, i) for i in range(m)]
+    k = torch.tensor(coeff, dtype=torch.float32)
+    k = k / k.sum()
+    return k
+
+class SRDownsample(nn.Module):
+    """
+    Shift-Robust downsampling (stride=2):
+      1) Anti-alias blur with separable binomial filter (size=m)
+      2) APS: 4つのポリフェーズ成分から「エネルギー最大」を選択
+    参照: SR-CNN（Anti-alias + APS）. 
+    """
+    def __init__(self, channels: int, filter_size: int = 7):
+        super().__init__()
+        self.channels = channels
+        self.filter_size = max(1, int(filter_size))
+        if self.filter_size > 1:
+            k1 = _binomial_filter_1d(self.filter_size)        # (m,)
+            k2d = torch.outer(k1, k1)                         # (m,m)
+            k2d = k2d / k2d.sum()
+            # depthwise conv 用に固定フィルタを登録（学習しない）
+            weight = k2d.view(1, 1, self.filter_size, self.filter_size).repeat(channels, 1, 1, 1)
+            self.register_buffer("weight", weight)
+            self.pad = self.filter_size // 2
+        else:
+            self.register_buffer("weight", torch.zeros(1))     # ダミー
+            self.pad = 0
+
+    def forward(self, x):
+        # x: (N,C,H,W)
+        N, C, H, W = x.shape
+        assert C == self.channels, "channels mismatch"
+        # 1) blur (low-pass)
+        if self.filter_size > 1:
+            x = F.conv2d(x, self.weight, bias=None, stride=1, padding=self.pad, groups=C)
+        # 2) APS: 4つの位相から選択（stride=2）
+        p00 = x[:, :, 0::2, 0::2]
+        p01 = x[:, :, 0::2, 1::2]
+        p10 = x[:, :, 1::2, 0::2]
+        p11 = x[:, :, 1::2, 1::2]
+        # エネルギー（L2ノルム）をバッチごとに算出（全チャネル・全空間）
+        e00 = (p00**2).sum(dim=(1,2,3))
+        e01 = (p01**2).sum(dim=(1,2,3))
+        e10 = (p10**2).sum(dim=(1,2,3))
+        e11 = (p11**2).sum(dim=(1,2,3))
+        E = torch.stack([e00, e01, e10, e11], dim=1)           # (N,4)
+        idx = E.argmax(dim=1)                                  # (N,)
+
+        # バッチ毎に対応する位相テンソルを選択
+        phases = [p00, p01, p10, p11]                          # list of (N,C,h,w)
+        # まとめてstackしてバッチ次元でgather
+        P = torch.stack(phases, dim=1)                         # (N,4,C,h,w)
+        idx_ = idx.view(N, 1, 1, 1).expand(-1, 1, C, P.size(-2), P.size(-1))
+        y = P.gather(dim=1, index=idx_).squeeze(1)            # (N,C,h,w)
+        return y
+
+# -------------------------------
+# SR-CNN 本体
+# -------------------------------
+class _SRCNN(nn.Module):
+    """
+    入力: (N, C, H, W) 例: C=3 (wavelength, f1, f6), H=W=64（前処理で補間）
+    構成: [Conv3x3 + ReLU + SRDown] x2 → Conv → GAP → FC(128) → FC
+    参照: SR-CNNは「通常のプーリング層を Anti-alias + APS に置換」. 
+    """
+    def __init__(self, in_ch: int, n_classes: int, sr_filter_size: int = 7, hidden: int = 128):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, 32, kernel_size=3, padding=1)
+        self.sr1   = SRDownsample(channels=32, filter_size=sr_filter_size)  # stride=2相当
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.sr2   = SRDownsample(channels=64, filter_size=sr_filter_size)
+        self.conv3 = nn.Conv2d(64, 96, kernel_size=3, padding=1)
+        self.gap   = nn.AdaptiveAvgPool2d(1)
+        self.fc1   = nn.Linear(96, hidden)
+        self.fc2   = nn.Linear(hidden, n_classes)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x)); x = self.sr1(x)   # 64->32
+        x = F.relu(self.conv2(x)); x = self.sr2(x)   # 32->16
+        x = F.relu(self.conv3(x))
+        x = self.gap(x).flatten(1)                   # (N,96)
+        x = F.relu(self.fc1(x))                      # (N,128)
+        return self.fc2(x)                           # logits
+
+
+# -------- DCNN 本体（dilation=3, AvgPool2d）--------
+class _DilatedCNN(nn.Module):
+    def __init__(self, in_ch: int, n_classes: int, hidden: int = 128, dilation: int = 3):
+        super().__init__()
+        # Block1: [DConv3x3(d=3) + ReLU + AvgPool2] × 3（出力chは常に8）
+        self.conv1 = nn.Conv2d(in_ch, 32, kernel_size=3, padding=3, dilation=dilation)
+        self.conv2 = nn.Conv2d(32,    64, kernel_size=3, padding=3, dilation=dilation)
+        self.conv3 = nn.Conv2d(64,    96, kernel_size=3, padding=3, dilation=dilation)
+        self.pool  = nn.AvgPool2d(2)
+
+        # Block2: Flatten → FC(128) + ReLU
+        self.fc1   = nn.Linear(96 *  (1), hidden)  # 後でGAPで(8,1,1)に潰す
+
+        # Block3: FC → logits
+        self.fc2   = nn.Linear(hidden, n_classes)
+
+        # 入力サイズ非依存化のためGAPを使用（論文はFlattenだが等価に軽量化）
+        self.gap   = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x):  # x: (N,C,H,W)
+        x = F.relu(self.conv1(x)); x = self.pool(x)
+        x = F.relu(self.conv2(x)); x = self.pool(x)
+        x = F.relu(self.conv3(x)); x = self.pool(x)
+        x = self.gap(x).flatten(1)      # -> (N, 8)
+        x = F.relu(self.fc1(x))         # -> (N, 128)
+        return self.fc2(x)              # logits
+
+
+# -------- sklearn風ラッパ: fit / predict / score --------
+class DCNNClassifierTorch:
+    """
+    入力: (N, 3, H, W)  # 例: H=W=64（オフライン補間後）
+    - fit(X, y, validation_data=(Xv, yv))
+    - predict(X) / predict_proba(X)
+    - score(X, y)
+    """
+    def __init__(
+        self,
+        n_classes: int,
+        dilation: int = 3,
+        input_shape=(3, 6, 6),
+        lr: float = 1e-3,
+        epochs: int = 40,
+        lr_switch_epoch: int = 21,
+        batch_size: int = 64,
+        weight_decay: float = 5e-4,
+        verbose: int = 1,
+        seed: int = 42,
+        device: str = "auto",
+        srcnn: bool = False,
+        sr_filter_size: int = 1,
+    ):
+        torch.manual_seed(seed); np.random.seed(seed)
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
+
+        if len(input_shape) == 2:
+            C, H, W = 1, input_shape[0], input_shape[1]
+        elif len(input_shape) == 3:
+            C, H, W = input_shape
+        else:
+            raise ValueError("input_shape must be (H,W) or (C,H,W)")
+        if srcnn:
+            self.model = _SRCNN(in_ch=C, n_classes=n_classes, sr_filter_size=sr_filter_size).to(self.device)
+        else:
+            self.model = _DilatedCNN(in_ch=C, n_classes=n_classes, dilation=dilation).to(self.device)
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+
+        # 論文に近いLRスケジュール（20epoch後にlr/10）
+        self.epochs = epochs
+        self.lr_switch_epoch = lr_switch_epoch
+        self.batch_size = batch_size
+        self.verbose = verbose
+
+        self.history = {"train_acc": [], "val_acc": [], "train_loss": [], "val_loss": []}
+
+    # ----- helpers -----
+    def _prep_X(self, X):
+        X = np.asarray(X, dtype=np.float32)
+        if X.ndim == 3:  # (N,H,W) -> (N,1,H,W)
+            X = X[:, None, :, :]
+        elif X.ndim == 4:
+            pass
+        else:
+            raise ValueError("X must be (N,H,W) or (N,1,H,W)")
+        return torch.from_numpy(X)
+
+    def _prep_y(self, y):
+        return torch.from_numpy(np.asarray(y, dtype=np.int64))
+
+    def _make_loader(self, X, y=None, shuffle=False):
+        Xt = self._prep_X(X)
+        if y is None:
+            ds = TensorDataset(Xt)
+        else:
+            yt = self._prep_y(y)
+            ds = TensorDataset(Xt, yt)
+        return DataLoader(ds, batch_size=self.batch_size, shuffle=shuffle)
+
+    # ----- API -----
+    def fit(self, X, y, validation_data=None):
+        train_loader = self._make_loader(X, y, shuffle=True)
+        val_loader = None
+        if validation_data is not None:
+            Xv, yv = validation_data
+            val_loader = self._make_loader(Xv, yv, shuffle=False)
+
+        for epoch in range(1, self.epochs+1):
+            # 手動LR減衰（20epoch以降 1/10）
+            if epoch == self.lr_switch_epoch:
+                for g in self.optimizer.param_groups:
+                    g["lr"] *= 0.1
+
+            self.model.train()
+            total_loss = 0.0; total_correct = 0; total_seen = 0
+            for batch in train_loader:
+                xb, yb = batch
+                xb = xb.to(self.device, non_blocking=True)
+                yb = yb.to(self.device, non_blocking=True)
+
+                self.optimizer.zero_grad()
+                logits = self.model(xb)
+                loss = self.criterion(logits, yb)
+                loss.backward()
+                self.optimizer.step()
+
+                total_loss   += float(loss.item()) * xb.size(0)
+                total_correct+= (logits.argmax(1) == yb).sum().item()
+                total_seen   += xb.size(0)
+
+            train_loss_epoch = total_loss / max(1, total_seen)
+            train_acc_epoch  = total_correct / max(1, total_seen)
+
+            val_acc = None; val_loss = None
+            if val_loader is not None:
+                self.model.eval()
+                vloss_sum, vcorrect, vseen = 0.0, 0, 0
+                with torch.no_grad():
+                    for xb, yb in val_loader:
+                        xb = xb.to(self.device, non_blocking=True)
+                        yb = yb.to(self.device, non_blocking=True)
+                        logits = self.model(xb)
+                        vloss_sum += float(self.criterion(logits, yb).item()) * xb.size(0)
+                        vcorrect  += (logits.argmax(1) == yb).sum().item()
+                        vseen     += xb.size(0)
+                val_loss = vloss_sum / max(1, vseen)
+                val_acc  = vcorrect  / max(1, vseen)
+
+            self.history["train_loss"].append(train_loss_epoch)
+            self.history["train_acc"].append(train_acc_epoch)
+            self.history["val_loss"].append(val_loss if val_loss is not None else float("nan"))
+            self.history["val_acc"].append(val_acc if val_acc is not None else float("nan"))
+
+            if self.verbose:
+                msg = f"[{epoch}/{self.epochs}] loss={train_loss_epoch:.4f} acc={train_acc_epoch:.3f}"
+                if val_loader is not None:
+                    msg += f" | val_loss={val_loss:.4f} val_acc={val_acc:.3f}"
+                print(msg)
+        return self
+
+    @torch.no_grad()
+    def predict(self, X):
+        loader = self._make_loader(X, y=None, shuffle=False)
+        self.model.eval()
+        preds = []
+        for (xb,) in loader:
+            xb = xb.to(self.device, non_blocking=True)
+            preds.append(self.model(xb).argmax(1).cpu().numpy())
+        return np.concatenate(preds, axis=0).astype(np.int64)
+
+    @torch.no_grad()
+    def predict_proba(self, X):
+        loader = self._make_loader(X, y=None, shuffle=False)
+        self.model.eval()
+        probs = []
+        for (xb,) in loader:
+            xb = xb.to(self.device, non_blocking=True)
+            probs.append(F.softmax(self.model(xb), dim=1).cpu().numpy())
+        return np.concatenate(probs, axis=0)
+
+    def score(self, X, y):
+        loader = self._make_loader(X, y, shuffle=False)
+        self.model.eval()
+        correct, total = 0, 0
+        with torch.no_grad():
+            for xb, yb in loader:
+                xb = xb.to(self.device, non_blocking=True)
+                yb = yb.to(self.device, non_blocking=True)
+                pred = self.model(xb).argmax(1)
+                correct += (pred == yb).sum().item()
+                total   += xb.size(0)
+        return correct / max(1, total)
+    
 
 import time
-
 
 # === main ===
 def main(subject='nojima'):
@@ -1429,9 +1910,9 @@ def main(subject='nojima'):
         tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
 
         # ========= チャネルごとに正規化 =========
-        mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-        std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-        tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
+        mean = np.mean(tmp_X.reshape(-1,8,8), axis=0)
+        std = np.std(tmp_X.reshape(-1,8,8), axis=0) + 1e-8
+        tmp_X = (tmp_X - mean.reshape(1, 1, 8, 8)) / std.reshape(1, 1, 8, 8)
         # ====================================
 
         # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
@@ -1445,12 +1926,12 @@ def main(subject='nojima'):
         wamp = [wamp_feat(x, threshold2) for x in tmp_X]
         td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
         td_psd = np.array(td_psd)
-        f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-        f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-        f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-        f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-        f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-        f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
+        f1 = td_psd[:,:,0].reshape(-1,8,8)
+        f2 = td_psd[:,:,1].reshape(-1,8,8)
+        f3 = td_psd[:,:,2].reshape(-1,8,8)
+        f4 = td_psd[:,:,3].reshape(-1,8,8)
+        f5 = td_psd[:,:,4].reshape(-1,8,8)
+        f6 = td_psd[:,:,5].reshape(-1,8,8)
         # td_psd = td_psd.reshape(td_psd.shape[0], -1)
         # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
         # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
@@ -1474,36 +1955,31 @@ def main(subject='nojima'):
             X_train = np.vstack([X_train, tmp_X])
             y_train = np.hstack([y_train, tmp_y])
 
-    X_train_aligment = X_train
-    # 学習
-    X_train_nonclopped = X_train
-    X_train_nonclopped = X_train_nonclopped.reshape(-1, 8*8)
 
-    clf = LinearDiscriminantAnalysis()
-    clf.fit(X_train_nonclopped, y_train)
+    # ハイパーパラメータ
+    lr = 1e-3 #8e-3
+    batch_size = 32 #128
+    epochs = 10
+    weight_decay = 5e-6
+    dilation = 3
+    interpolated_size = 71
 
-    # 学習時のアライメントマップ平均を1秒毎に計算し、３秒間で平均(補間なし)
-    gestures = np.unique(y_train) + 1
-    train_trial_alignment_maps_without_interp_1sec = []
-    for gesture in gestures:
-        z_list = []
-        trial_list = []
-        iterator = X_train_aligment[y_train==gesture-1]
-        i = 0
-        for tmp_X_train_aligment in iterator[:]:
-            z_list.append(tmp_X_train_aligment)
-            i += 1
-            if i == 19:  # トライアル数で分割
-                trial_list.append(np.mean(np.array(z_list), axis=0))
-                z_list = []
-                i = 0
-        train_trial_alignment_maps_without_interp_1sec.append(trial_list)
+    # 学習データ：前処理 + データ拡張
+    X_train, y_train = build_offline_dataset(X_train, y_train, out_hw=(interpolated_size, interpolated_size), median_ksize=3, M=1, aug_shift=10, aug_snr_db=25)
+    
+    # z-score 正規化
+    mu, sigma = fit_channel_stats(X_train)
+    X_train = apply_channel_norm(X_train, mu, sigma)
 
-    # ==============位置合わせ=============#
+    clf = DCNNClassifierTorch(input_shape=(X_train.shape[1], interpolated_size, interpolated_size), n_classes=34, epochs=epochs, batch_size=batch_size, lr=lr, lr_switch_epoch=21, weight_decay=weight_decay, dilation=dilation, verbose=1, srcnn=False)
+    log = clf.fit(X_train, y_train)
+
+
+    # ==============推論=============#
     accracy_all = []
-    accracy_all_normal = []
     time_alignment_list = []
-    for electrode_place in ["original2"]:#["downleft5mm", "downleft10mm", "clockwise"]:
+    time_adoptation_list = []
+    for electrode_place in ["downleft5mm", "downleft10mm", "clockwise"]:
         print(f'electrode_place: {electrode_place}')
         # ずれデータ
         emg_list_test = []
@@ -1531,192 +2007,74 @@ def main(subject='nojima'):
                     y_list_test.append(j+1)
                 except FileNotFoundError:
                     pass
-        # 位置合わせ用特徴量マップ抽出
-        for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
-            # --- ラベル（学習用）：あなたのラベリングに置き換えてください ---
-            # 中央6×6から特徴抽出した個数に合わせる必要があります。
-            tmp_X = emg_test_8x8  # (n_samples, 8, 8)
-            # tmp_X = extract_center_6x6(tmp_X)  # (n_samples, 6, 6)
-            tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
-
-            # ========= チャネルごとに正規化 =========
-            mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-            std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-            tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
-            # ====================================
-
-            # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
-
-            # 特徴量抽出
-            ptp = [ptp_feat(x) for x in tmp_X]
-            rms = [rms_feat(x) for x in tmp_X]
-            wl = [waveform_length(x) for x in tmp_X]
-            zc = [zero_crossings(x, threshold) for x in tmp_X]
-            ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
-            wamp = [wamp_feat(x, threshold2) for x in tmp_X]
-            td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
-            td_psd = np.array(td_psd)
-            f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-            f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-            f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-            f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-            f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-            f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
-            # td_psd = td_psd.reshape(td_psd.shape[0], -1)
-            # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
-            # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
-            # tmp_X = rms
-            # tmp_X = np.stack([rms, wl, zc], axis=1)
-            tmp_X = np.stack([wl, rms, zc], axis=1)
-            # tmp_X = rms
-            # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
-            n_windows = len(tmp_X)
-            # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
-            tmp_y = [int(label)-1 for i in range(n_windows)]
-            sizes_te.append(n_windows)
-
-            if len(tmp_y) != len(tmp_X):
-                raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
-            
-            if i == 0:
-                X_test = tmp_X
-                y_test = tmp_y
-            else:
-                X_test = np.vstack([X_test, tmp_X])
-                y_test = np.hstack([y_test, tmp_y])
-
-        X_test_aligment = X_test
-
-        # 推論時のアライメントマップ平均を1秒毎に計算し、３秒間で平均(補間なし)
-        gestures = np.unique(y_test) + 1
-        test_trial_alignment_maps_without_interp_1sec = []
-        for gesture in gestures:
-            z_list = []
-            trial_list = []
-            iterator = X_test_aligment[y_test==gesture-1, 0]
-            i = 0
-            for tmp_X_test_aligment in iterator[:]:
-                z_list.append(tmp_X_test_aligment)
-                i += 1
-                if i == 19:  # トライアル数で分割
-                    trial_list.append(np.mean(np.array(z_list), axis=0))
-                    z_list = []
-                    i = 0
-            test_trial_alignment_maps_without_interp_1sec.append(trial_list)
-
-        #-----------------------------------------
-        # 位置合わせ
-        #-----------------------------------------
+ 
         accuracy_each_position = []
-        accuracy_each_position_normal = []
-        for gesture in range(1,8):
-            accuracy_each_gesture_alignment = []
-            for trial in range(1,6):
-                start_alignment = time.time() # 時間計測開始
-                scalar = MinMaxScaler()
-                img_ref = (scalar.fit_transform(train_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].reshape(-1,1)).reshape(train_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].shape)*255).astype(np.float32)
-                img_test = (scalar.fit_transform(test_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].reshape(-1,1)).reshape(test_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].shape)*255).astype(np.float32)
+        for trial in range(1,6):
+            for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
+                # --- ラベル（学習用）：あなたのラベリングに置き換えてください ---
+                # 中央6×6から特徴抽出した個数に合わせる必要があります。
+                tmp_X = emg_test_8x8  # (n_samples, 8, 8)
+                # tmp_X = extract_center_6x6(tmp_X)  # (n_samples, 6, 6)
+                tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
 
-                if 1 ==1:
-                # try:
-                    # 初期値：単位行列（≒剛体）
-                    init = [1, 0, 0, 1, 0, 0]
+                # ========= チャネルごとに正規化 =========
+                mean = np.mean(tmp_X.reshape(-1,8,8), axis=0)
+                std = np.std(tmp_X.reshape(-1,8,8), axis=0) + 1e-8
+                tmp_X = (tmp_X - mean.reshape(1, 1, 8, 8)) / std.reshape(1, 1, 8, 8)
+                # ====================================
 
-                    res = minimize(
-                        objective_ncc,
-                        x0=init,
-                        args=(img_test, img_ref),
-                        method="Powell"
-                    )
+                # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
 
-                    a, b, c, d, tx, ty = res.x
+                # 特徴量抽出
+                ptp = [ptp_feat(x) for x in tmp_X]
+                rms = [rms_feat(x) for x in tmp_X]
+                wl = [waveform_length(x) for x in tmp_X]
+                zc = [zero_crossings(x, threshold) for x in tmp_X]
+                ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
+                wamp = [wamp_feat(x, threshold2) for x in tmp_X]
+                td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
+                td_psd = np.array(td_psd)
+                f1 = td_psd[:,:,0].reshape(-1,8,8)
+                f2 = td_psd[:,:,1].reshape(-1,8,8)
+                f3 = td_psd[:,:,2].reshape(-1,8,8)
+                f4 = td_psd[:,:,3].reshape(-1,8,8)
+                f5 = td_psd[:,:,4].reshape(-1,8,8)
+                f6 = td_psd[:,:,5].reshape(-1,8,8)
+                # td_psd = td_psd.reshape(td_psd.shape[0], -1)
+                # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
+                # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
+                # tmp_X = rms
+                # tmp_X = np.stack([rms, wl, zc], axis=1)
+                # tmp_X = np.stack([wl, rms, zc], axis=1)
+                tmp_X = wl
+                # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
+                n_windows = len(tmp_X)
+                # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
+                tmp_y = [int(label)-1 for i in range(n_windows)]
+                sizes_te.append(n_windows)
 
-                    theta_rad = np.arctan2(c, a)
-                    theta_deg = np.degrees(theta_rad)
-                    sx = np.sqrt(a**2 + c**2)
-                    sy = np.sqrt(b**2 + d**2)
-                    shear = (a*b + c*d) / (sx*sy)
+                if len(tmp_y) != len(tmp_X):
+                    raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
+                
+                if i == 0:
+                    X_test = tmp_X
+                    y_test = tmp_y
+                else:
+                    X_test = np.vstack([X_test, tmp_X])
+                    y_test = np.hstack([y_test, tmp_y])
 
-                    end_alignment = time.time()
-                    time_alignment_list.append(end_alignment - start_alignment)
-                        
 
-                    # ==============推論フェーズ=============#
-                    # 推論用特徴量マップ抽出
-                    tx = -tx  # mm→チャネル単位
-                    ty = -ty  # mm→チャネル単位
-                    theta = theta_rad #theta_rad  # degree
-                    sx = sx
-                    sy = sy
-                    shear = shear
-                    # ==============推論フェーズ=============#
-                    j = 0
-                    for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
-                        # 位置合わせに使用したtrialは無視
-                        if (i+1) % 5 == trial:
-                            continue
-                        tmp_X = warp_batch_images(emg_test_8x8, tx, ty, theta, sx, sy, shear)
-                        tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
+            # テストデータ：前処理
+            X_test, y_test = build_offline_dataset(X_test, y_test, out_hw=(interpolated_size, interpolated_size), median_ksize=3, M=0, aug_shift=0, aug_snr_db=None)
 
-                        # ========= チャネルごとに正規化 =========
-                        mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-                        std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-                        tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
-                        # ====================================
+            # z-score 正規化
+            X_test = apply_channel_norm(X_test, mu, sigma)
 
-                        # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
+            y_pred = clf.predict(X_test)
+            proba = clf.predict_proba(X_test)
+            score = clf.score(X_test, y_test)
 
-                        # 特徴量抽出
-                        ptp = [ptp_feat(x) for x in tmp_X]
-                        rms = [rms_feat(x) for x in tmp_X]
-                        wl = [waveform_length(x) for x in tmp_X]
-                        zc = [zero_crossings(x, threshold) for x in tmp_X]
-                        ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
-                        wamp = [wamp_feat(x, threshold2) for x in tmp_X]
-                        td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
-                        td_psd = np.array(td_psd)
-                        f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-                        f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-                        f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-                        f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-                        f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-                        f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
-                        # td_psd = td_psd.reshape(td_psd.shape[0], -1)
-                        # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
-                        # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
-                        # tmp_X = rms
-                        # tmp_X = np.stack([rms, wl, zc], axis=1)
-                        # tmp_X = np.stack([wl, rms, zc], axis=1)
-                        tmp_X = wl
-                        # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
-                        n_windows = len(tmp_X)
-                        # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
-                        tmp_y = [int(label)-1 for i in range(n_windows)]
-                        sizes_te.append(n_windows)
-
-                        if len(tmp_y) != len(tmp_X):
-                            raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
-                        
-                        if j == 0:
-                            X_test = tmp_X
-                            y_test = tmp_y
-                        else:
-                            X_test = np.vstack([X_test, tmp_X])
-                            y_test = np.hstack([y_test, tmp_y])
-                        
-                        j += 1
-
-                    # 推論
-                    X_test_nonclopped = X_test.reshape(-1, 8*8)
-                    y_pred = clf.predict(X_test_nonclopped)
-                    proba = clf.predict_proba(X_test_nonclopped)
-                    score = clf.score(X_test_nonclopped, y_test)
-                    accuracy_each_gesture_alignment.append(score)
-                    accuracy_each_position.append(score)
-                    accracy_all.append(score)
-                # except:
-                #     print(f"電極配置: {electrode_place}, ジェスチャ: {gesture}, trial1: {trial1}, trial2: {trial2} でエラー")
-            print(f'accuracy of gesture{gesture}: {np.mean(accuracy_each_gesture_alignment)}')
+            accuracy_each_position.append(score)
+            accracy_all.append(score)
         print(f'accuracy of {electrode_place}: {np.mean(accuracy_each_position)}')
     print(f'accracy_all: {np.mean(accracy_all)}')
-    print(f'average time for alignment: {np.mean(time_alignment_list)} sec')

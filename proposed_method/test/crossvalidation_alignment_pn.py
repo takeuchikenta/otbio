@@ -1641,7 +1641,7 @@ def main(subject='nojima'):
     accracy_all = []
     time_alignment_list = []
     time_adoptation_list = []
-    for electrode_place in ["downleft5mm", "downleft10mm", "clockwise"]:
+    for electrode_place in ["original2"]:#["downleft5mm", "downleft10mm", "clockwise"]:
         print(f'electrode_place: {electrode_place}')
         # ずれデータ
         emg_list_test = []

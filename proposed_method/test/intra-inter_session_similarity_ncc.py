@@ -8,8 +8,8 @@ import cv2
 # -----------------------
 # Settings
 # -----------------------
-DATA_DIR = "output/stefan/EMG_map_array/wl"
-SESSIONS = ["original", "original2", "downleft5mm", "downleft10mm", "clockwise"]
+DATA_DIR = "output/nojima/EMG_map_array/wl"
+SESSIONS = ["original", "original2", "downleft5mm", "downleft10mm", "clockwise"] #["original", "downleft10mm"]
 GESTURES = range(1, 8)
 EXPECTED_SECS = set(range(1, 16))
 

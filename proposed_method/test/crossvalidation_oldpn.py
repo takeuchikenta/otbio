@@ -1356,13 +1356,44 @@ def warp_batch_images(batch_data, tx, ty, theta, sx, sy, shear):
     return result_data
 
 # 目的関数
-def ncc(a, b):
-    if np.std(a) == 0 or np.std(b) == 0: return 0.0
-    a_mean = a - np.mean(a)
-    b_mean = b - np.mean(b)
-    num = np.sum(a_mean * b_mean)
-    den = np.sqrt(np.sum(a_mean**2)) * np.sqrt(np.sum(b_mean**2)) + 1e-8
-    return float(num / den)
+from scipy.ndimage import gaussian_filter
+
+def preprocess_wl(img: np.ndarray, sigma: float = 0.5) -> np.ndarray:
+    """
+    WLマップの前処理: 対数変換で非線形性を緩和し、ガウシアンで高周波ノイズを除去。
+    """
+    # log(1+x)でゼロ除算回避しつつ対数変換
+    img_log = np.log1p(img)
+    return gaussian_filter(img_log, sigma=sigma)
+
+def calc_ngc(img1: np.ndarray, img2: np.ndarray, eps: float = 1e-8) -> float:
+    """
+    正規化勾配相関 (NGC) を計算。
+    値は [-1, 1] の範囲。1に近いほど勾配の向きと強度の分布が一致。
+    """
+    # 1. 勾配の計算 (中央差分)
+    # g1_y, g1_x = np.gradient(img1) # 行列サイズが大きい場合
+    # 行列サイズが小さいHD-sEMG(例:8x16)ではSobelの方が安定する場合があるが、gradientで十分
+    img1 = cv2.GaussianBlur(img1,(3,3),0)
+    img2 = cv2.GaussianBlur(img2,(3,3),0)
+
+    dy1, dx1 = np.gradient(img1)
+    dy2, dx2 = np.gradient(img2)
+
+    # 2. 各点での勾配ベクトルの内積 (Numerator)
+    # A . B = |A||B|cos(theta)
+    dot_product = (dx1 * dx2) + (dy1 * dy2)
+
+    # 3. 勾配の大きさ (Magnitude)
+    mag1_sq = dx1**2 + dy1**2
+    mag2_sq = dx2**2 + dy2**2
+
+    # 4. 全体の相関を計算 (Global NGC)
+    # 分母: 全エネルギーの平方根の積 (Cauchy-Schwarz)
+    numerator = np.sum(dot_product)
+    denominator = np.sqrt(np.sum(mag1_sq)) * np.sqrt(np.sum(mag2_sq))
+
+    return numerator / (denominator + eps)
 
 def affine_transform(img, params):
     a, b, c, d, tx, ty = params
@@ -1371,13 +1402,86 @@ def affine_transform(img, params):
     h, w = img.shape
     return cv2.warpAffine(img, M, (w, h))
 
-def objective_ncc(params, ref, mov):
+def objective_ngc(params, ref, mov):
     warped = affine_transform(mov, params)
-    return 1 - ncc(ref, warped)
+    return 1 - calc_ngc(ref, warped)
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import numpy as np
+
+# --- 1. モデル定義 (Encoder) ---
+class EMGEncoder(nn.Module):
+    """
+    HD-sEMG画像から特徴ベクトルを抽出するネットワーク
+    """
+    def __init__(self, input_dim=1, hidden_dim=64, output_dim=64):
+        super(EMGEncoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(input_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(hidden_dim, output_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(output_dim),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)) # どんなサイズでも 1x1 にする
+        )
+        
+    def forward(self, x):
+        x = self.encoder(x)
+        return x.view(x.size(0), -1)
+
+# --- 2. 距離計算などのユーティリティ ---
+def compute_prototypes(embeddings, labels, n_way):
+    """
+    サポートセット(適応データ)からプロトタイプを計算する関数
+    """
+    prototypes = []
+    for c in range(n_way):
+        # クラスcに属するデータの平均をとる
+        mask = (labels == c)
+        if mask.sum() > 0:
+            p = embeddings[mask].mean(0)
+            prototypes.append(p)
+        else:
+            # 万が一データがない場合はゼロベクトルなどを入れる（エラー回避）
+            prototypes.append(torch.zeros_like(embeddings[0]))
+    return torch.stack(prototypes)
+
+def euclidean_metric(query, prototypes):
+    """
+    クエリとプロトタイプ間のユークリッド距離を計算
+    """
+    n = query.size(0)
+    m = prototypes.size(0)
+    d = query.size(1)
+    
+    query = query.unsqueeze(1).expand(n, m, d)
+    prototypes = prototypes.unsqueeze(0).expand(n, m, d)
+    
+    # 距離の二乗（Squared Euclidean Distance）
+    dists = torch.pow(query - prototypes, 2).sum(2)
+    return dists
+
+def preprocess_ndarray(x, y):
+    # 1. Tensorに変換
+    x_tensor = torch.from_numpy(x)
+    y_tensor = torch.from_numpy(y)
+    
+    # 2. チャネル次元の追加 (Batch, Height, Width) -> (Batch, Channel, Height, Width)
+    # CNNは4次元入力を期待するため、2番目に次元を追加します
+    x_tensor = x_tensor.unsqueeze(1) 
+    
+    return x_tensor, y_tensor
 
 import time
-
 
 # === main ===
 def main(subject='nojima'):
@@ -1429,9 +1533,9 @@ def main(subject='nojima'):
         tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
 
         # ========= チャネルごとに正規化 =========
-        mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-        std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-        tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
+        mean = np.mean(tmp_X.reshape(-1,8,8), axis=0)
+        std = np.std(tmp_X.reshape(-1,8,8), axis=0) + 1e-8
+        tmp_X = (tmp_X - mean.reshape(1, 1, 8, 8)) / std.reshape(1, 1, 8, 8)
         # ====================================
 
         # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
@@ -1445,12 +1549,12 @@ def main(subject='nojima'):
         wamp = [wamp_feat(x, threshold2) for x in tmp_X]
         td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
         td_psd = np.array(td_psd)
-        f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-        f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-        f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-        f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-        f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-        f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
+        f1 = td_psd[:,:,0].reshape(-1,8,8)
+        f2 = td_psd[:,:,1].reshape(-1,8,8)
+        f3 = td_psd[:,:,2].reshape(-1,8,8)
+        f4 = td_psd[:,:,3].reshape(-1,8,8)
+        f5 = td_psd[:,:,4].reshape(-1,8,8)
+        f6 = td_psd[:,:,5].reshape(-1,8,8)
         # td_psd = td_psd.reshape(td_psd.shape[0], -1)
         # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
         # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
@@ -1474,35 +1578,83 @@ def main(subject='nojima'):
             X_train = np.vstack([X_train, tmp_X])
             y_train = np.hstack([y_train, tmp_y])
 
+
+    # 学習時のアライメントマップ平均を時間窓毎に計算 (補間なし)
     X_train_aligment = X_train
-    # 学習
-    X_train_nonclopped = X_train
-    X_train_nonclopped = X_train_nonclopped.reshape(-1, 8*8)
-
-    clf = LinearDiscriminantAnalysis()
-    clf.fit(X_train_nonclopped, y_train)
-
-    # 学習時のアライメントマップ平均を1秒毎に計算し、３秒間で平均(補間なし)
     gestures = np.unique(y_train) + 1
-    train_trial_alignment_maps_without_interp_1sec = []
+
+    train_window_alignment_maps = []
     for gesture in gestures:
         z_list = []
-        trial_list = []
         iterator = X_train_aligment[y_train==gesture-1]
-        i = 0
         for tmp_X_train_aligment in iterator[:]:
             z_list.append(tmp_X_train_aligment)
-            i += 1
-            if i == 19:  # トライアル数で分割
-                trial_list.append(np.mean(np.array(z_list), axis=0))
-                z_list = []
-                i = 0
-        train_trial_alignment_maps_without_interp_1sec.append(trial_list)
+        train_window_alignment_maps.append(z_list)
 
-    # ==============位置合わせ=============#
+    # --- 設定パラメータ ---
+    N_WAY = 7       # クラス数 (ジェスチャーの種類)
+    IMG_SIZE = 8   # HD-sEMGのグリッドサイズ (16x16)
+    BATCH_SIZE = 32
+
+    # 「1秒間」の定義
+    # 例: サンプリング周波数とウィンドウ幅による。
+    # 仮に 1つのウィンドウが時系列データの一部で、1秒間に20個のウィンドウ(フレーム)が得られるとする
+    FRAMES_PER_SEC = 19 
+
+    # デバイス設定
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    X_tr = np.array(train_window_alignment_maps).reshape(-1,8,8)
+    y_tr = np.array([[i for j in range(285)] for i in range(7)]).reshape(-1)
+
+    source_train_x, source_train_y = preprocess_ndarray(X_tr.astype(np.float32), y_tr.astype(np.int64))
+    source_train_x = source_train_x.to(device)
+    source_train_y = source_train_y.to(device)
+
+    # ==========================================
+    # Step 1: Sourceデータでの事前学習 (Pre-training)
+    # ==========================================
+    encoder = EMGEncoder().to(device)
+    optimizer = optim.Adam(encoder.parameters(), lr=0.001)
+
+    # ここでは簡易的に、Sourceデータ上でプロトタイプ学習を行うループ
+    # (本来はもっと多くのエピソードを回します)
+    encoder.train()
+    for epoch in range(100): # 簡易的なので10エピソードのみ
+        # ランダムサンプリングしてエピソード作成
+        perm = torch.randperm(len(source_train_x))
+        sx = source_train_x[perm[:100]] # Support (一部)
+        sy = source_train_y[perm[:100]]
+        qx = source_train_x[perm[100:200]] # Query (一部)
+        qy = source_train_y[perm[100:200]]
+        
+        optimizer.zero_grad()
+        
+        # 特徴抽出
+        z_support = encoder(sx)
+        z_query = encoder(qx)
+        
+        # プロトタイプ計算
+        protos = compute_prototypes(z_support, sy, N_WAY)
+        
+        # 距離計算 & 分類
+        dists = euclidean_metric(z_query, protos)
+        log_p_y = F.log_softmax(-dists, dim=1)
+        
+        loss = F.nll_loss(log_p_y, qy)
+        loss.backward()
+        optimizer.step()
+        
+        if epoch % 5 == 0:
+            print(f"Epoch {epoch}: Loss = {loss.item():.4f}")
+            
+    print("Done pre-training.")
+
+
+    # ==============適応 + 推論=============#
     accracy_all = []
-    accracy_all_normal = []
     time_alignment_list = []
+    time_adoptation_list = []
     for electrode_place in ["original2"]:#["downleft5mm", "downleft10mm", "clockwise"]:
         print(f'electrode_place: {electrode_place}')
         # ずれデータ
@@ -1531,192 +1683,126 @@ def main(subject='nojima'):
                     y_list_test.append(j+1)
                 except FileNotFoundError:
                     pass
-        # 位置合わせ用特徴量マップ抽出
-        for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
-            # --- ラベル（学習用）：あなたのラベリングに置き換えてください ---
-            # 中央6×6から特徴抽出した個数に合わせる必要があります。
-            tmp_X = emg_test_8x8  # (n_samples, 8, 8)
-            # tmp_X = extract_center_6x6(tmp_X)  # (n_samples, 6, 6)
-            tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
-
-            # ========= チャネルごとに正規化 =========
-            mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-            std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-            tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
-            # ====================================
-
-            # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
-
-            # 特徴量抽出
-            ptp = [ptp_feat(x) for x in tmp_X]
-            rms = [rms_feat(x) for x in tmp_X]
-            wl = [waveform_length(x) for x in tmp_X]
-            zc = [zero_crossings(x, threshold) for x in tmp_X]
-            ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
-            wamp = [wamp_feat(x, threshold2) for x in tmp_X]
-            td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
-            td_psd = np.array(td_psd)
-            f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-            f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-            f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-            f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-            f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-            f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
-            # td_psd = td_psd.reshape(td_psd.shape[0], -1)
-            # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
-            # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
-            # tmp_X = rms
-            # tmp_X = np.stack([rms, wl, zc], axis=1)
-            tmp_X = np.stack([wl, rms, zc], axis=1)
-            # tmp_X = rms
-            # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
-            n_windows = len(tmp_X)
-            # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
-            tmp_y = [int(label)-1 for i in range(n_windows)]
-            sizes_te.append(n_windows)
-
-            if len(tmp_y) != len(tmp_X):
-                raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
-            
-            if i == 0:
-                X_test = tmp_X
-                y_test = tmp_y
-            else:
-                X_test = np.vstack([X_test, tmp_X])
-                y_test = np.hstack([y_test, tmp_y])
-
-        X_test_aligment = X_test
-
-        # 推論時のアライメントマップ平均を1秒毎に計算し、３秒間で平均(補間なし)
-        gestures = np.unique(y_test) + 1
-        test_trial_alignment_maps_without_interp_1sec = []
-        for gesture in gestures:
-            z_list = []
-            trial_list = []
-            iterator = X_test_aligment[y_test==gesture-1, 0]
-            i = 0
-            for tmp_X_test_aligment in iterator[:]:
-                z_list.append(tmp_X_test_aligment)
-                i += 1
-                if i == 19:  # トライアル数で分割
-                    trial_list.append(np.mean(np.array(z_list), axis=0))
-                    z_list = []
-                    i = 0
-            test_trial_alignment_maps_without_interp_1sec.append(trial_list)
-
-        #-----------------------------------------
-        # 位置合わせ
-        #-----------------------------------------
+ 
         accuracy_each_position = []
-        accuracy_each_position_normal = []
-        for gesture in range(1,8):
-            accuracy_each_gesture_alignment = []
-            for trial in range(1,6):
-                start_alignment = time.time() # 時間計測開始
-                scalar = MinMaxScaler()
-                img_ref = (scalar.fit_transform(train_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].reshape(-1,1)).reshape(train_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].shape)*255).astype(np.float32)
-                img_test = (scalar.fit_transform(test_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].reshape(-1,1)).reshape(test_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].shape)*255).astype(np.float32)
+        for trial in range(1,6):
+            for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
+                # --- ラベル（学習用）：あなたのラベリングに置き換えてください ---
+                # 中央6×6から特徴抽出した個数に合わせる必要があります。
+                tmp_X = emg_test_8x8  # (n_samples, 8, 8)
+                # tmp_X = extract_center_6x6(tmp_X)  # (n_samples, 6, 6)
+                tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
 
-                if 1 ==1:
-                # try:
-                    # 初期値：単位行列（≒剛体）
-                    init = [1, 0, 0, 1, 0, 0]
+                # ========= チャネルごとに正規化 =========
+                mean = np.mean(tmp_X.reshape(-1,8,8), axis=0)
+                std = np.std(tmp_X.reshape(-1,8,8), axis=0) + 1e-8
+                tmp_X = (tmp_X - mean.reshape(1, 1, 8, 8)) / std.reshape(1, 1, 8, 8)
+                # ====================================
 
-                    res = minimize(
-                        objective_ncc,
-                        x0=init,
-                        args=(img_test, img_ref),
-                        method="Powell"
-                    )
+                # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
 
-                    a, b, c, d, tx, ty = res.x
+                # 特徴量抽出
+                ptp = [ptp_feat(x) for x in tmp_X]
+                rms = [rms_feat(x) for x in tmp_X]
+                wl = [waveform_length(x) for x in tmp_X]
+                zc = [zero_crossings(x, threshold) for x in tmp_X]
+                ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
+                wamp = [wamp_feat(x, threshold2) for x in tmp_X]
+                td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
+                td_psd = np.array(td_psd)
+                f1 = td_psd[:,:,0].reshape(-1,8,8)
+                f2 = td_psd[:,:,1].reshape(-1,8,8)
+                f3 = td_psd[:,:,2].reshape(-1,8,8)
+                f4 = td_psd[:,:,3].reshape(-1,8,8)
+                f5 = td_psd[:,:,4].reshape(-1,8,8)
+                f6 = td_psd[:,:,5].reshape(-1,8,8)
+                # td_psd = td_psd.reshape(td_psd.shape[0], -1)
+                # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
+                # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
+                # tmp_X = rms
+                # tmp_X = np.stack([rms, wl, zc], axis=1)
+                # tmp_X = np.stack([wl, rms, zc], axis=1)
+                tmp_X = wl
+                # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
+                n_windows = len(tmp_X)
+                # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
+                tmp_y = [int(label)-1 for i in range(n_windows)]
+                sizes_te.append(n_windows)
 
-                    theta_rad = np.arctan2(c, a)
-                    theta_deg = np.degrees(theta_rad)
-                    sx = np.sqrt(a**2 + c**2)
-                    sy = np.sqrt(b**2 + d**2)
-                    shear = (a*b + c*d) / (sx*sy)
+                if len(tmp_y) != len(tmp_X):
+                    raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
+                
+                if i == 0:
+                    X_test = tmp_X
+                    y_test = tmp_y
+                else:
+                    X_test = np.vstack([X_test, tmp_X])
+                    y_test = np.hstack([y_test, tmp_y])
 
-                    end_alignment = time.time()
-                    time_alignment_list.append(end_alignment - start_alignment)
-                        
 
-                    # ==============推論フェーズ=============#
-                    # 推論用特徴量マップ抽出
-                    tx = -tx  # mm→チャネル単位
-                    ty = -ty  # mm→チャネル単位
-                    theta = theta_rad #theta_rad  # degree
-                    sx = sx
-                    sy = sy
-                    shear = shear
-                    # ==============推論フェーズ=============#
-                    j = 0
-                    for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
-                        # 位置合わせに使用したtrialは無視
-                        if (i+1) % 5 == trial:
-                            continue
-                        tmp_X = warp_batch_images(emg_test_8x8, tx, ty, theta, sx, sy, shear)
-                        tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
+            # 学習時のアライメントマップ平均を時間窓毎に計算 (補間なし)
+            X_test_aligment = X_test
+            gestures = np.unique(y_test) + 1
 
-                        # ========= チャネルごとに正規化 =========
-                        mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-                        std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-                        tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
-                        # ====================================
+            test_window_alignment_maps = []
+            for gesture in gestures:
+                z_list = []
+                iterator = X_test_aligment[y_test==gesture-1]
+                for tmp_X_test_aligment in iterator[:]:
+                    z_list.append(tmp_X_test_aligment)
+                test_window_alignment_maps.append(z_list)
+            
+            
+            # 適応データ + テストデータ作成
+            X_adap = np.array(test_window_alignment_maps).reshape(7,285,64)[:, (trial-1)*57:(trial-1)*57+19].reshape(-1,8,8)
+            y_adap = np.array([[i for j in range(19)] for i in range(7)]).reshape(-1)
+            X_te = np.array(test_window_alignment_maps).reshape(7,285,64)[:, np.r_[0:(trial-1)*57, trial*57:285]].reshape(-1,8,8)
+            y_te = np.array([[i for j in range(228)] for i in range(7)]).reshape(-1)
 
-                        # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
+            target_adapt_x, target_adapt_y = preprocess_ndarray(X_adap.astype(np.float32), y_adap.astype(np.int64))
+            target_test_x, target_test_y = preprocess_ndarray(X_te.astype(np.float32), y_te.astype(np.int64))
 
-                        # 特徴量抽出
-                        ptp = [ptp_feat(x) for x in tmp_X]
-                        rms = [rms_feat(x) for x in tmp_X]
-                        wl = [waveform_length(x) for x in tmp_X]
-                        zc = [zero_crossings(x, threshold) for x in tmp_X]
-                        ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
-                        wamp = [wamp_feat(x, threshold2) for x in tmp_X]
-                        td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
-                        td_psd = np.array(td_psd)
-                        f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-                        f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-                        f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-                        f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-                        f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-                        f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
-                        # td_psd = td_psd.reshape(td_psd.shape[0], -1)
-                        # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
-                        # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
-                        # tmp_X = rms
-                        # tmp_X = np.stack([rms, wl, zc], axis=1)
-                        # tmp_X = np.stack([wl, rms, zc], axis=1)
-                        tmp_X = wl
-                        # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
-                        n_windows = len(tmp_X)
-                        # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
-                        tmp_y = [int(label)-1 for i in range(n_windows)]
-                        sizes_te.append(n_windows)
+            target_adapt_x = target_adapt_x.to(device)
+            target_adapt_y = target_adapt_y.to(device)
+            target_test_x = target_test_x.to(device)
+            target_test_y = target_test_y.to(device)
+                
+            # ==========================================
+            # Step 2: 再装着時の適応 (Prototypical Adaptation)
+            # ==========================================
+            start_adoptation = time.time() # 時間計測開始
+            encoder.eval() # エンコーダは固定 (評価モード)
 
-                        if len(tmp_y) != len(tmp_X):
-                            raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
-                        
-                        if j == 0:
-                            X_test = tmp_X
-                            y_test = tmp_y
-                        else:
-                            X_test = np.vstack([X_test, tmp_X])
-                            y_test = np.hstack([y_test, tmp_y])
-                        
-                        j += 1
+            with torch.no_grad():
+                # 1. 適応データ(1秒分)をエンコード
+                z_adapt = encoder(target_adapt_x)
+                
+                # 2. 新しいセッション専用のプロトタイプを計算
+                # これが「キャリブレーション」の正体です
+                new_prototypes = compute_prototypes(z_adapt, target_adapt_y, N_WAY)
+            
+            end_adoptation = time.time()
+            time_adoptation_list.append(end_adoptation - start_adoptation)
 
-                    # 推論
-                    X_test_nonclopped = X_test.reshape(-1, 8*8)
-                    y_pred = clf.predict(X_test_nonclopped)
-                    proba = clf.predict_proba(X_test_nonclopped)
-                    score = clf.score(X_test_nonclopped, y_test)
-                    accuracy_each_gesture_alignment.append(score)
-                    accuracy_each_position.append(score)
-                    accracy_all.append(score)
-                # except:
-                #     print(f"電極配置: {electrode_place}, ジェスチャ: {gesture}, trial1: {trial1}, trial2: {trial2} でエラー")
-            print(f'accuracy of gesture{gesture}: {np.mean(accuracy_each_gesture_alignment)}')
+            # ==========================================
+            # Step 3: 再装着後の推論 (Inference)
+            # ==========================================
+            with torch.no_grad():
+                # テストデータをエンコード
+                z_test = encoder(target_test_x)
+                
+                # 「新しいプロトタイプ」を使って距離計算
+                dists = euclidean_metric(z_test, new_prototypes)
+                
+                # 予測 (距離が一番近いクラス)
+                predictions = torch.argmin(dists, dim=1)
+                
+                # 精度計算
+                acc = (predictions == target_test_y).float().mean()
+                score = acc.to('cpu').detach().numpy().copy()
+
+            accuracy_each_position.append(score)
+            accracy_all.append(score)
         print(f'accuracy of {electrode_place}: {np.mean(accuracy_each_position)}')
     print(f'accracy_all: {np.mean(accracy_all)}')
-    print(f'average time for alignment: {np.mean(time_alignment_list)} sec')
+    print(f'average time for adoptation: {np.mean(time_adoptation_list)} sec')

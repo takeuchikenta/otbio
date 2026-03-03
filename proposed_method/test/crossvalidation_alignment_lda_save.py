@@ -279,277 +279,7 @@ def spectral_entropy(window_2d: np.ndarray, fs: float, nperseg=None, noverlap=No
     H = np.where(power > 0, H, np.nan)
     return H
 
-# ----- 角度を-90°~+90°に変更する関数 -----
-def ninety2ninety_radian(theta_radian):
-  return (theta_radian + np.pi/2) % np.pi - np.pi/2
 
-# ----- 筋活動中心・方向の取得 -----
-# ピーク検出とガウス関数フィッティング
-def gaussian_fitting(emg_data, curve, feature_func, fs=2048, window_ms=25, threshold=0, func_type=True):
-  # パラメータ設定
-  emg_data = emg_data  # shape: (n_samples, n_channels)
-  curve = curve  # 近似曲面
-  feature_func = feature_func  # 特徴量抽出関数
-  fs = fs  # サンプリング周波数
-  window_ms = window_ms    # ウィンドウ幅 [ms]
-  window_size = int(fs * (window_ms / 1000))  # サンプル数に変換
-  threshold = threshold   # featureの最大 - 平均がこの値以上なら採用
-  half_win = window_size // 2
-
-  # 出力先
-  valid_indices = []
-
-  # ---------- 64チャネルすべてに対してピーク検出 ----------
-  peak_mask = np.zeros(emg_data.shape[0], dtype=bool)
-
-  for ch in range(64):
-      rms_signal = np.sqrt(emg_data[:,ch]**2)
-      peaks, _ = find_peaks(rms_signal, distance=50,
-                        height=np.mean(rms_signal) + np.std(rms_signal))
-      # peaks, _ = find_peaks(emg_data[:, ch], distance=window_size//2, height=np.std(emg_data[:,ch]) * 1)
-      peak_mask[peaks] = True  # どこか1チャネルでもピークがあればTrue
-
-  # 全体でのピーク位置で条件を評価
-  for t in np.where(peak_mask)[0]:
-      if t - half_win < 0 or t + half_win >= emg_data.shape[0]:
-          continue  # ウィンドウが境界を超えるならスキップ
-
-      snippet = emg_data[t - half_win : t + half_win, :]  # shape: [window_size, 64]
-      if func_type:
-          feature_per_ch = feature_func(snippet, fs=fs)  # 各チャネルのfeature
-      else:
-          feature_per_ch = feature_func(snippet)  # 各チャネルのfeature
-      feature_mean = np.mean(feature_per_ch)
-      feature_max = np.max(feature_per_ch)
-
-      if feature_max - feature_mean >= threshold:
-          valid_indices.append(t)
-
-  print(f"検出されたピーク数（条件を満たすもの）: {len(valid_indices)}")
-
-  # MUAP波形の切り出し
-  snippets = []
-  valid_peaks = []
-  for peak in valid_indices:
-      if peak - window_size//2 >= 0 and peak + window_size//2 < emg_data.shape[0]:
-          snippet = emg_data[peak - window_size//2 : peak + window_size//2, :]
-          snippets.append(snippet)
-          valid_peaks.append(peak)
-
-  snippets = np.array(snippets)
-  valid_peaks = np.array(valid_peaks)
-
-
-  # 座標グリッド
-  x = np.arange(8)
-  y = np.arange(8)
-  xv, yv = np.meshgrid(x, y)
-  coords = np.vstack((xv.ravel(), yv.ravel()))
-
-  centers = []
-  directions = []
-  theta_1s = []
-  features = []
-  for snippet in snippets[:]:
-    try:
-      segment = snippet
-      #ピーク間振幅
-      if func_type:
-          feature = feature_func(segment, fs=fs) #shape:(64,)
-      else:
-          feature = feature_func(segment) #shape:(64,)
-      map_2d = feature.reshape(8, 8)
-
-      # フィッティング
-      max_index = np.unravel_index(np.argmax(map_2d), map_2d.shape)
-      initial = [np.max(feature)-np.min(feature), max_index[0], max_index[1], 1, 1, 0, np.min(feature)]
-      bounds = ([0, 0, 0, 0.1, 0.1, -np.pi/2, -np.inf],
-              [np.inf, 7, 7, 5, 5, np.pi/2, np.inf])
-      popt, _ = curve_fit(curve, coords, feature, p0=initial, bounds=bounds, maxfev=5000)
-      A, x0, y0, sigma_x, sigma_y, theta, offset = popt #パラメータ取得
-      center = (x0, y0)
-      if sigma_x > sigma_y:
-        theta_1 = ninety2ninety_radian(theta)
-        # print('σx > σy')
-      else:
-        theta_1 = ninety2ninety_radian(theta + np.pi/2)
-        # print('σy >= σx')
-      direction = (np.cos(theta_1), np.sin(theta_1))
-
-      centers.append(center)
-      directions.append(direction)
-      theta_1s.append(np.degrees(theta_1))
-
-      feature = []
-      feature.append(center[0])
-      feature.append(center[1])
-      feature.append(np.degrees(theta_1))
-      features.append(feature)
-    except RuntimeError:
-       pass
-
-  return features
-
-# gmm
-def fit_gmm_auto(X, max_components=5, criterion='bic', covariance_type='full', sample_weight=None, upsample_factor=5, map_visualize=True, criterion_visualize=True):
-    lowest_crit = np.inf
-    best_gmm = None
-    crits = []
-
-    if sample_weight is not None:
-      p = sample_weight / sample_weight.sum()
-      n_draw = max(len(X), upsample_factor * len(X))
-      idx = np.random.choice(len(X), size=n_draw, replace=True, p=p)
-      X_fit = X[idx]
-
-      if map_visualize:
-          x = X_fit[:, 0]
-          y = X_fit[:, 1]
-          plt.figure(figsize=(6, 6))
-          plt.hist2d(x, y, bins=70, cmap='Blues')
-          plt.colorbar(label='Counts')
-          # plt.xticks(np.arange(0, 71, 1))
-          # plt.yticks(np.arange(0, 71, 1))
-          plt.xlim(0, 70)
-          plt.ylim(0, 70)
-          plt.xlabel('X')
-          plt.ylabel('Y')
-          plt.title('2D Histogram of Upsampled Data for GMM Fitting')
-          plt.show()
-
-    for n in range(1, max_components + 1):
-        gmm = GaussianMixture(n_components=n, covariance_type=covariance_type, random_state=0)
-        if sample_weight is not None:
-          gmm.fit(X_fit)
-        else:
-          gmm.fit(X)
-
-        crit_val = gmm.bic(X) if criterion == 'bic' else gmm.aic(X)
-        crits.append(crit_val)
-
-        if crit_val < lowest_crit:
-            lowest_crit = crit_val
-            best_gmm = gmm
-
-    if criterion_visualize:
-      # 可視化（任意）
-      plt.plot(range(1, max_components + 1), crits, marker='o')
-      plt.xlabel("Number of components")
-      plt.ylabel(criterion.upper())
-      plt.title(f"{criterion.upper()} for GMM model selection")
-      plt.grid(True)
-      plt.show()
-      print(f"Selected n_components = {best_gmm.n_components}")
-
-    return best_gmm
-
-def gmm(emg_data, curve, feature_func, fs=2048, window_ms=25, threshold=0, percent=95, max_components=4, criterion='bic', upsample_factor=5, func_type=True):
-    # ---------- パラメータ設定 ----------
-    emg_data = emg_data  # shape: (n_samples, n_channels)
-    curve = curve  # 近似曲面
-    feature_func = feature_func  # 特徴量抽出関数
-    fs = fs  # サンプリング周波数
-    window_ms = window_ms    # ウィンドウ幅 [ms]
-    window_size = int(fs * (window_ms / 1000))  # サンプル数に変換
-    threshold = threshold   # featureの最大 - 平均がこの値以上なら採用
-    half_win = window_size // 2
-
-    # ---------- 出力先 ----------
-    valid_indices = []
-
-    # ---------- 64チャネルすべてに対してピーク検出 ----------
-    peak_mask = np.zeros(emg_data.shape[0], dtype=bool)
-
-    for ch in range(64):
-        rms_signal = np.sqrt(emg_data[:,ch]**2)
-        peaks, _ = find_peaks(rms_signal, distance=50,
-                        height=np.mean(rms_signal) + np.std(rms_signal))
-        # peaks, _ = find_peaks(emg_data[:, ch], distance=window_size//2, height=np.std(emg_data[:,ch]) * 1)
-        peak_mask[peaks] = True  # どこか1チャネルでもピークがあればTrue
-
-    # ---------- 全体でのピーク位置で条件を評価 ----------
-    for t in np.where(peak_mask)[0]:
-        if t - half_win < 0 or t + half_win >= emg_data.shape[0]:
-            continue  # ウィンドウが境界を超えるならスキップ
-
-        snippet = emg_data[t - half_win : t + half_win, :]  # shape: [window_size, 64]
-        if func_type:
-            feature_per_ch = feature_func(snippet, fs=fs)  # 各チャネルのfeature
-        else:
-            feature_per_ch = feature_func(snippet)  # 各チャネルのfeature
-        feature_mean = np.mean(feature_per_ch)
-        feature_max = np.max(feature_per_ch)
-
-        if feature_max - feature_mean >= threshold:
-            valid_indices.append(t)
-
-    print(f"検出されたピーク数（条件を満たすもの）: {len(valid_indices)}")
-
-    # ----- MUAP波形の切り出し -----
-    snippets = []
-    valid_peaks = []
-    for peak in valid_indices:
-        if peak - window_size//2 >= 0 and peak + window_size//2 < emg_data.shape[0]:
-            snippet = emg_data[peak - window_size//2 : peak + window_size//2, :]
-            snippets.append(snippet)
-            valid_peaks.append(peak)
-
-    snippets = np.array(snippets)
-    valid_peaks = np.array(valid_peaks)
-
-
-    # 座標グリッド
-    x = np.arange(8)
-    y = np.arange(8)
-    xv, yv = np.meshgrid(x, y)
-    coords = np.vstack((xv.ravel(), yv.ravel()))
-
-    # ==== 描画用補間座標 ====
-    n_interp = 10  # チャネル間の補間数（1チャネルを10分割）
-    x_interp = np.linspace(0, 7, (8 - 1) * n_interp + 1)
-    y_interp = np.linspace(0, 7, (8 - 1) * n_interp + 1)
-    x_mesh, y_mesh = np.meshgrid(x_interp, y_interp)
-    coords_interp = np.vstack((x_mesh.ravel(), y_mesh.ravel()))  # shape: (2, N)
-
-
-    features = []
-    for snippet in snippets[:]:
-        try:
-            segment = snippet
-            if func_type:
-                feature = feature_func(segment, fs=fs) #shape:(64,)
-            else:
-                feature = feature_func(segment) #shape:(64,)
-            map_2d = feature.reshape(8, 8)
-
-            interp_spline = RectBivariateSpline(y, x, map_2d)
-            map_2d = interp_spline(y_interp, x_interp)  # shape: (Nx, Ny)
-
-            percent = percent
-            gmm_coords = np.column_stack(np.where(map_2d >= np.percentile(map_2d, percent)))[:,::-1]
-            weights = map_2d[map_2d >= np.percentile(map_2d, percent)].flatten()
-
-            # GMMを自動選定でフィット
-            gmm = fit_gmm_auto(gmm_coords, max_components=max_components, criterion=criterion, sample_weight=weights, upsample_factor=upsample_factor, map_visualize=False, criterion_visualize=False)
-
-
-            for n, (mean, cov) in enumerate(zip(gmm.means_, gmm.covariances_)):
-                center = mean / n_interp  # (x, y)
-                # print(f'mean:{mean}, center:{center}')
-                eigvals, eigvecs = np.linalg.eigh(cov)
-                main_dir = eigvecs[:, np.argmax(eigvals)]
-                angle = np.arctan2(main_dir[1], main_dir[0])  # 方向（ラジアン）
-                angle = ninety2ninety_radian(angle)
-
-                feature = []
-                feature.append(center[0])
-                feature.append(center[1])
-                feature.append(np.degrees(angle))
-                features.append(feature)
-        except ValueError:
-            pass
-
-    return features
 
 # ファイル名出力関数
 def file_name_output(subject, hand="right", electrode_place="original", gesture=1, trial=1):
@@ -581,156 +311,6 @@ def file_name_output(subject, hand="right", electrode_place="original", gesture=
     # print(file_name)
     return file_name
 
-#===筋線維方向を棒で描画するユーティリティ===
-def wrap_half_pi(theta_rad):
-    """
-    軸データ(θ≡θ+π)を [-pi/2, pi/2] に丸める。
-    棒の向きとしてはこの軸方向がちょうど良い。
-    """
-    return (theta_rad + np.pi/2) % np.pi - np.pi/2
-
-
-def scale_keypoints(keypoints, scale):
-    """
-    元の keypoints の座標(x,y)を scale 倍して新しいリストを返す。
-    角度やampはそのままコピーする。
-    keypoints は dict型 [{"x":..,"y":..,"angle":..,"amp":..}, ...]
-    または tuple型 (x,y,angle[,amp]) の混在でもOKにする。
-    """
-    scaled = []
-    for kp in keypoints:
-        if isinstance(kp, dict):
-            new_kp = kp.copy()
-            new_kp["x"] = kp["x"] * scale
-            new_kp["y"] = kp["y"] * scale
-            # angleやampなどはそのまま
-            scaled.append(new_kp)
-        else:
-            # tuple/list想定
-            if len(kp) == 3:
-                x, y, ang = kp
-                scaled.append((x*scale, y*scale, ang))
-            elif len(kp) >= 4:
-                x, y, ang, val = kp[0], kp[1], kp[2], kp[3]
-                # 4つ目以降(ampなど)もそのまま残す
-                scaled.append((x*scale, y*scale, ang, val))
-            else:
-                raise ValueError("keypoint tuple must be at least (x,y,angle)")
-    return scaled
-
-def draw_keypoints_as_sticks(
-    keypoints,
-    canvas_h=71,
-    canvas_w=71,
-    stick_len=10.0,
-    stick_thickness=2,
-    angle_is_deg=False,
-    intensity_key=None,
-    intensity_default=1.0,
-    use_wrap=True,
-    combine_mode="add",
-    clip_output=True
-):
-    # float32のキャンバス（加算用）
-    canvas = np.zeros((canvas_h, canvas_w), dtype=np.float32)
-
-    half_len = stick_len / 2.0
-
-    for kp in keypoints:
-        # --- 1) x, y, angle, strength を取り出す ---
-        if isinstance(kp, dict):
-            x = float(kp["x"])
-            y = float(kp["y"])
-            if "angle" in kp:
-                ang = float(kp["angle"])
-            elif "angle_rad" in kp:
-                ang = float(kp["angle_rad"])
-            else:
-                raise ValueError("dictにangle (rad) がありません")
-
-            if angle_is_deg:
-                ang = np.deg2rad(ang)
-
-            if use_wrap:
-                ang = wrap_half_pi(ang)
-
-            # 強度（明るさ）
-            if intensity_key is not None:
-                strength = float(kp.get(intensity_key, intensity_default))
-            else:
-                strength = float(intensity_default)
-
-        else:
-            # tuple/list想定: (x, y, angle, [strength?])
-            if len(kp) < 3:
-                raise ValueError("tupleは少なくとも(x,y,angle)が必要")
-            x = float(kp[0])
-            y = float(kp[1])
-            ang = float(kp[2])
-
-            if angle_is_deg:
-                ang = np.deg2rad(ang)
-            if use_wrap:
-                ang = wrap_half_pi(ang)
-
-            if len(kp) >= 4:
-                strength = float(kp[3])
-            else:
-                strength = float(intensity_default)
-
-        # --- 2) 棒の両端座標を計算 ---
-        # 方向ベクトル (dx, dy) を angle から作る
-        dx = np.cos(ang) * half_len
-        dy = np.sin(ang) * half_len
-
-        # OpenCV は (col=x, row=y) なので注意
-        x1 = x - dx
-        y1 = y - dy
-        x2 = x + dx
-        y2 = y + dy
-
-        # 描画先はuint8画像を想定するが、加算したいので一旦別レイヤに描く
-        layer = np.zeros((canvas_h, canvas_w), dtype=np.float32)
-
-        # cv2.line の引数は整数座標なので丸める
-        p1 = (int(round(x1)), int(round(y1)))
-        p2 = (int(round(x2)), int(round(y2)))
-
-        # 線を描画（強度はとりあえず 255*strength を期待値に）
-        # 後で正規化するならここは strength だけでもいいけど
-        val = float(strength)
-
-        # OpenCVはBGRイメージを想定することが多いけど、ここは1ch灰色なので
-        cv2.line(
-            layer,
-            p1,
-            p2,
-            color=val,          # floatでもOK。layerはfloat32
-            thickness=stick_thickness,
-            lineType=cv2.LINE_AA
-        )
-
-        # --- 3) layer を canvas に合成 ---
-        if combine_mode == "add":
-            canvas += layer
-        elif combine_mode == "max":
-            canvas = np.maximum(canvas, layer)
-        else:
-            raise ValueError("combine_mode must be 'add' or 'max'")
-
-    # --- 4) 正規化して0-255にスケール ---
-    vmax = canvas.max()
-    if vmax > 0:
-        img_f = canvas / vmax
-    else:
-        img_f = canvas.copy()
-
-    img_u8 = (img_f * 255.0).astype(np.uint8)
-
-    if clip_output:
-        img_u8 = np.clip(img_u8, 0, 255).astype(np.uint8)
-
-    return img_u8, img_f
 
 # -*- coding: utf-8 -*-
 import numpy as np
@@ -1380,138 +960,23 @@ import time
 
 
 # === main ===
-def main(subject='nojima'):
+def main():
 
-    print(f'subject name:{subject}')
-    # 学習データ
-    emg_list_train = []  # 各要素: shape=(T,8,8)
-    y_list_train   = []  # ファイル名から抽出したラベル（長さ = 試行数）
-    for j in range(7):
-        for k in range(5):
-            try:
-                file_name = file_name_output(subject=subject, hand='right', electrode_place="original", gesture=j+1, trial=k+1)
-                path = '../../data/highMVC/' + file_name
-                encoding = 'utf-8-sig'  # または 'utf-16'
-                df = pd.read_csv(path, encoding=encoding, sep=';', header=None) 
+    # ### 修正点1: 全被験者リストと結果保存用リスト ###
+    subjects = ['nojima', 'takeuchi2', 'yamamoto', 'stefan']
+    all_results_data = []
 
-                # ==== EMGデータの抽出 ====
-                time_emg = df.iloc[:, 0].values  # 時刻 [s]
-                emg_data = df.iloc[:, 1:65].values  # shape: (time, 64)
+    print(f"Starting Align+LDA Analysis for: {subjects}")
 
-                # ==== 基本パラメータ ====
-                fs = int(1 / np.mean(np.diff(time_emg)))  # サンプリング周波数
-                emg_data = remove_power_line_harmonics(emg_data, fs=fs, fundamental=60.0, Q=30.0)
-                filtered_emg = butter_bandpass_filter(emg_data, fs=fs, low_hz=20.0, high_hz=450.0, order=4)
-                emg_data = filtered_emg.reshape(-1,8,8)  # shape: (time, 64)
-                
-                emg_list_train.append(emg_data)
-                y_list_train.append(j+1)
-            except FileNotFoundError:
-                pass
-    
-    # ==============学習フェーズ=============#
-    window = 200   # サンプル幅（例：100ms @ 2kHz）
-    hop    = 50    # ホップ（例：25ms）
-    window = int(window * (fs/1000))
-    hop = int(hop * (fs/1000))
-    # X_train = []
-    # y_train = []
-    sizes_te = []
-    threshold = 0
-    threshold2 = 0.0013
-    ch_size = 8
-    # 8×8channel
-    for i, (emg_train_8x8, label) in enumerate(zip(emg_list_train, y_list_train)):
-        # --- ラベル（学習用）：あなたのラベリングに置き換えてください ---
-        # 中央6×6から特徴抽出した個数に合わせる必要があります。
-        tmp_X = emg_train_8x8  # (n_samples, 8, 8)
-        # tmp_X = extract_center_6x6(tmp_X)  # (n_samples, 6, 6)
-        tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
-
-        # ========= チャネルごとに正規化 =========
-        mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-        std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-        tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
-        # ====================================
-
-        # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
-
-        # 特徴量抽出
-        ptp = [ptp_feat(x) for x in tmp_X]
-        rms = [rms_feat(x) for x in tmp_X]
-        wl = [waveform_length(x) for x in tmp_X]
-        zc = [zero_crossings(x, threshold) for x in tmp_X]
-        ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
-        wamp = [wamp_feat(x, threshold2) for x in tmp_X]
-        td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
-        td_psd = np.array(td_psd)
-        f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-        f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-        f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-        f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-        f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-        f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
-        # td_psd = td_psd.reshape(td_psd.shape[0], -1)
-        # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
-        # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
-        # tmp_X = rms
-        # tmp_X = np.stack([rms, wl, zc], axis=1)
-        # tmp_X = np.stack([wl, rms, zc], axis=1)
-        tmp_X = wl
-        # tmp_X = extract_features(emg_train_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
-        n_windows = len(tmp_X)
-        # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
-        tmp_y = [int(label)-1 for i in range(n_windows)]
-        sizes_te.append(n_windows)
-
-        if len(tmp_y) != len(tmp_X):
-            raise ValueError(f"y_train length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
-        
-        if i == 0:
-            X_train = tmp_X
-            y_train = tmp_y
-        else:
-            X_train = np.vstack([X_train, tmp_X])
-            y_train = np.hstack([y_train, tmp_y])
-
-    X_train_aligment = X_train
-    # 学習
-    X_train_nonclopped = X_train
-    X_train_nonclopped = X_train_nonclopped.reshape(-1, 8*8)
-
-    clf = LinearDiscriminantAnalysis()
-    clf.fit(X_train_nonclopped, y_train)
-
-    # 学習時のアライメントマップ平均を1秒毎に計算し、３秒間で平均(補間なし)
-    gestures = np.unique(y_train) + 1
-    train_trial_alignment_maps_without_interp_1sec = []
-    for gesture in gestures:
-        z_list = []
-        trial_list = []
-        iterator = X_train_aligment[y_train==gesture-1]
-        i = 0
-        for tmp_X_train_aligment in iterator[:]:
-            z_list.append(tmp_X_train_aligment)
-            i += 1
-            if i == 19:  # トライアル数で分割
-                trial_list.append(np.mean(np.array(z_list), axis=0))
-                z_list = []
-                i = 0
-        train_trial_alignment_maps_without_interp_1sec.append(trial_list)
-
-    # ==============位置合わせ=============#
-    accracy_all = []
-    accracy_all_normal = []
-    time_alignment_list = []
-    for electrode_place in ["original2"]:#["downleft5mm", "downleft10mm", "clockwise"]:
-        print(f'electrode_place: {electrode_place}')
-        # ずれデータ
-        emg_list_test = []
-        y_list_test   = []
+    for subject in subjects:
+        print(f"\n{'='*20} Processing Subject: {subject} {'='*20}")
+        # 学習データ
+        emg_list_train = []  # 各要素: shape=(T,8,8)
+        y_list_train   = []  # ファイル名から抽出したラベル（長さ = 試行数）
         for j in range(7):
             for k in range(5):
                 try:
-                    file_name = file_name_output(subject=subject, hand='right', electrode_place=electrode_place, gesture=j+1, trial=k+1)
+                    file_name = file_name_output(subject=subject, hand='right', electrode_place="original", gesture=j+1, trial=k+1)
                     path = '../../data/highMVC/' + file_name
                     encoding = 'utf-8-sig'  # または 'utf-16'
                     df = pd.read_csv(path, encoding=encoding, sep=';', header=None) 
@@ -1522,20 +987,31 @@ def main(subject='nojima'):
 
                     # ==== 基本パラメータ ====
                     fs = int(1 / np.mean(np.diff(time_emg)))  # サンプリング周波数
-
                     emg_data = remove_power_line_harmonics(emg_data, fs=fs, fundamental=60.0, Q=30.0)
                     filtered_emg = butter_bandpass_filter(emg_data, fs=fs, low_hz=20.0, high_hz=450.0, order=4)
                     emg_data = filtered_emg.reshape(-1,8,8)  # shape: (time, 64)
                     
-                    emg_list_test.append(emg_data)
-                    y_list_test.append(j+1)
+                    emg_list_train.append(emg_data)
+                    y_list_train.append(j+1)
                 except FileNotFoundError:
                     pass
-        # 位置合わせ用特徴量マップ抽出
-        for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
+        
+        # ==============学習フェーズ=============#
+        window = 200   # サンプル幅（例：100ms @ 2kHz）
+        hop    = 50    # ホップ（例：25ms）
+        window = int(window * (fs/1000))
+        hop = int(hop * (fs/1000))
+        # X_train = []
+        # y_train = []
+        sizes_te = []
+        threshold = 0
+        threshold2 = 0.0013
+        ch_size = 8
+        # 8×8channel
+        for i, (emg_train_8x8, label) in enumerate(zip(emg_list_train, y_list_train)):
             # --- ラベル（学習用）：あなたのラベリングに置き換えてください ---
             # 中央6×6から特徴抽出した個数に合わせる必要があります。
-            tmp_X = emg_test_8x8  # (n_samples, 8, 8)
+            tmp_X = emg_train_8x8  # (n_samples, 8, 8)
             # tmp_X = extract_center_6x6(tmp_X)  # (n_samples, 6, 6)
             tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
 
@@ -1554,169 +1030,294 @@ def main(subject='nojima'):
             zc = [zero_crossings(x, threshold) for x in tmp_X]
             ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
             wamp = [wamp_feat(x, threshold2) for x in tmp_X]
-            td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
-            td_psd = np.array(td_psd)
-            f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-            f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-            f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-            f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-            f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-            f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
+            # td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
+            # td_psd = np.array(td_psd)
+            # f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
+            # f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
+            # f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
+            # f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
+            # f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
+            # f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
             # td_psd = td_psd.reshape(td_psd.shape[0], -1)
             # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
             # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
             # tmp_X = rms
             # tmp_X = np.stack([rms, wl, zc], axis=1)
-            tmp_X = np.stack([wl, rms, zc], axis=1)
-            # tmp_X = rms
-            # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
+            # tmp_X = np.stack([wl, rms, zc], axis=1)
+            tmp_X = wl
+            # tmp_X = extract_features(emg_train_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
             n_windows = len(tmp_X)
             # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
             tmp_y = [int(label)-1 for i in range(n_windows)]
             sizes_te.append(n_windows)
 
             if len(tmp_y) != len(tmp_X):
-                raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
+                raise ValueError(f"y_train length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
             
             if i == 0:
-                X_test = tmp_X
-                y_test = tmp_y
+                X_train = tmp_X
+                y_train = tmp_y
             else:
-                X_test = np.vstack([X_test, tmp_X])
-                y_test = np.hstack([y_test, tmp_y])
+                X_train = np.vstack([X_train, tmp_X])
+                y_train = np.hstack([y_train, tmp_y])
 
-        X_test_aligment = X_test
+        X_train_aligment = X_train
+        # 学習
+        X_train_nonclopped = X_train
+        X_train_nonclopped = X_train_nonclopped.reshape(-1, 8*8)
 
-        # 推論時のアライメントマップ平均を1秒毎に計算し、３秒間で平均(補間なし)
-        gestures = np.unique(y_test) + 1
-        test_trial_alignment_maps_without_interp_1sec = []
+        clf = LinearDiscriminantAnalysis()
+        clf.fit(X_train_nonclopped, y_train)
+
+        # 学習時のアライメントマップ平均を1秒毎に計算し、３秒間で平均(補間なし)
+        gestures = np.unique(y_train) + 1
+        train_trial_alignment_maps_without_interp_1sec = []
         for gesture in gestures:
             z_list = []
             trial_list = []
-            iterator = X_test_aligment[y_test==gesture-1, 0]
+            iterator = X_train_aligment[y_train==gesture-1]
             i = 0
-            for tmp_X_test_aligment in iterator[:]:
-                z_list.append(tmp_X_test_aligment)
+            for tmp_X_train_aligment in iterator[:]:
+                z_list.append(tmp_X_train_aligment)
                 i += 1
                 if i == 19:  # トライアル数で分割
                     trial_list.append(np.mean(np.array(z_list), axis=0))
                     z_list = []
                     i = 0
-            test_trial_alignment_maps_without_interp_1sec.append(trial_list)
+            train_trial_alignment_maps_without_interp_1sec.append(trial_list)
 
-        #-----------------------------------------
-        # 位置合わせ
-        #-----------------------------------------
-        accuracy_each_position = []
-        accuracy_each_position_normal = []
-        for gesture in range(1,8):
-            accuracy_each_gesture_alignment = []
-            for trial in range(1,6):
-                start_alignment = time.time() # 時間計測開始
-                scalar = MinMaxScaler()
-                img_ref = (scalar.fit_transform(train_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].reshape(-1,1)).reshape(train_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].shape)*255).astype(np.float32)
-                img_test = (scalar.fit_transform(test_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].reshape(-1,1)).reshape(test_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].shape)*255).astype(np.float32)
+        # ==============位置合わせ=============#
+        accracy_all = []
+        accracy_all_normal = []
+        time_alignment_list = []
+        for electrode_place in ["original2","downleft5mm", "downleft10mm", "clockwise"]:
+            print(f'electrode_place: {electrode_place}')
+            # ずれデータ
+            emg_list_test = []
+            y_list_test   = []
+            for j in range(7):
+                for k in range(5):
+                    try:
+                        file_name = file_name_output(subject=subject, hand='right', electrode_place=electrode_place, gesture=j+1, trial=k+1)
+                        path = '../../data/highMVC/' + file_name
+                        encoding = 'utf-8-sig'  # または 'utf-16'
+                        df = pd.read_csv(path, encoding=encoding, sep=';', header=None) 
 
-                if 1 ==1:
-                # try:
-                    # 初期値：単位行列（≒剛体）
-                    init = [1, 0, 0, 1, 0, 0]
+                        # ==== EMGデータの抽出 ====
+                        time_emg = df.iloc[:, 0].values  # 時刻 [s]
+                        emg_data = df.iloc[:, 1:65].values  # shape: (time, 64)
 
-                    res = minimize(
-                        objective_ncc,
-                        x0=init,
-                        args=(img_test, img_ref),
-                        method="Powell"
-                    )
+                        # ==== 基本パラメータ ====
+                        fs = int(1 / np.mean(np.diff(time_emg)))  # サンプリング周波数
 
-                    a, b, c, d, tx, ty = res.x
-
-                    theta_rad = np.arctan2(c, a)
-                    theta_deg = np.degrees(theta_rad)
-                    sx = np.sqrt(a**2 + c**2)
-                    sy = np.sqrt(b**2 + d**2)
-                    shear = (a*b + c*d) / (sx*sy)
-
-                    end_alignment = time.time()
-                    time_alignment_list.append(end_alignment - start_alignment)
+                        emg_data = remove_power_line_harmonics(emg_data, fs=fs, fundamental=60.0, Q=30.0)
+                        filtered_emg = butter_bandpass_filter(emg_data, fs=fs, low_hz=20.0, high_hz=450.0, order=4)
+                        emg_data = filtered_emg.reshape(-1,8,8)  # shape: (time, 64)
                         
+                        emg_list_test.append(emg_data)
+                        y_list_test.append(j+1)
+                    except FileNotFoundError:
+                        pass
+            # 位置合わせ用特徴量マップ抽出
+            for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
+                # --- ラベル（学習用）：あなたのラベリングに置き換えてください ---
+                # 中央6×6から特徴抽出した個数に合わせる必要があります。
+                tmp_X = emg_test_8x8  # (n_samples, 8, 8)
+                # tmp_X = extract_center_6x6(tmp_X)  # (n_samples, 6, 6)
+                tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
 
-                    # ==============推論フェーズ=============#
-                    # 推論用特徴量マップ抽出
-                    tx = -tx  # mm→チャネル単位
-                    ty = -ty  # mm→チャネル単位
-                    theta = theta_rad #theta_rad  # degree
-                    sx = sx
-                    sy = sy
-                    shear = shear
-                    # ==============推論フェーズ=============#
-                    j = 0
-                    for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
-                        # 位置合わせに使用したtrialは無視
-                        if (i+1) % 5 == trial:
-                            continue
-                        tmp_X = warp_batch_images(emg_test_8x8, tx, ty, theta, sx, sy, shear)
-                        tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
+                # ========= チャネルごとに正規化 =========
+                mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
+                std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
+                tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
+                # ====================================
 
-                        # ========= チャネルごとに正規化 =========
-                        mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
-                        std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
-                        tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
-                        # ====================================
+                # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
 
-                        # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
+                # 特徴量抽出
+                ptp = [ptp_feat(x) for x in tmp_X]
+                rms = [rms_feat(x) for x in tmp_X]
+                wl = [waveform_length(x) for x in tmp_X]
+                zc = [zero_crossings(x, threshold) for x in tmp_X]
+                ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
+                wamp = [wamp_feat(x, threshold2) for x in tmp_X]
+                # td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
+                # td_psd = np.array(td_psd)
+                # f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
+                # f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
+                # f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
+                # f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
+                # f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
+                # f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
+                # td_psd = td_psd.reshape(td_psd.shape[0], -1)
+                # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
+                # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
+                # tmp_X = rms
+                # tmp_X = np.stack([rms, wl, zc], axis=1)
+                tmp_X = np.stack([wl, rms, zc], axis=1)
+                # tmp_X = rms
+                # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
+                n_windows = len(tmp_X)
+                # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
+                tmp_y = [int(label)-1 for i in range(n_windows)]
+                sizes_te.append(n_windows)
 
-                        # 特徴量抽出
-                        ptp = [ptp_feat(x) for x in tmp_X]
-                        rms = [rms_feat(x) for x in tmp_X]
-                        wl = [waveform_length(x) for x in tmp_X]
-                        zc = [zero_crossings(x, threshold) for x in tmp_X]
-                        ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
-                        wamp = [wamp_feat(x, threshold2) for x in tmp_X]
-                        td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
-                        td_psd = np.array(td_psd)
-                        f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
-                        f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
-                        f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
-                        f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
-                        f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
-                        f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
-                        # td_psd = td_psd.reshape(td_psd.shape[0], -1)
-                        # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
-                        # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
-                        # tmp_X = rms
-                        # tmp_X = np.stack([rms, wl, zc], axis=1)
-                        # tmp_X = np.stack([wl, rms, zc], axis=1)
-                        tmp_X = wl
-                        # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
-                        n_windows = len(tmp_X)
-                        # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
-                        tmp_y = [int(label)-1 for i in range(n_windows)]
-                        sizes_te.append(n_windows)
+                if len(tmp_y) != len(tmp_X):
+                    raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
+                
+                if i == 0:
+                    X_test = tmp_X
+                    y_test = tmp_y
+                else:
+                    X_test = np.vstack([X_test, tmp_X])
+                    y_test = np.hstack([y_test, tmp_y])
 
-                        if len(tmp_y) != len(tmp_X):
-                            raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
-                        
-                        if j == 0:
-                            X_test = tmp_X
-                            y_test = tmp_y
-                        else:
-                            X_test = np.vstack([X_test, tmp_X])
-                            y_test = np.hstack([y_test, tmp_y])
-                        
-                        j += 1
+            X_test_aligment = X_test
 
-                    # 推論
-                    X_test_nonclopped = X_test.reshape(-1, 8*8)
-                    y_pred = clf.predict(X_test_nonclopped)
-                    proba = clf.predict_proba(X_test_nonclopped)
-                    score = clf.score(X_test_nonclopped, y_test)
-                    accuracy_each_gesture_alignment.append(score)
-                    accuracy_each_position.append(score)
-                    accracy_all.append(score)
-                # except:
-                #     print(f"電極配置: {electrode_place}, ジェスチャ: {gesture}, trial1: {trial1}, trial2: {trial2} でエラー")
-            print(f'accuracy of gesture{gesture}: {np.mean(accuracy_each_gesture_alignment)}')
-        print(f'accuracy of {electrode_place}: {np.mean(accuracy_each_position)}')
-    print(f'accracy_all: {np.mean(accracy_all)}')
-    print(f'average time for alignment: {np.mean(time_alignment_list)} sec')
+            # 推論時のアライメントマップ平均を1秒毎に計算し、３秒間で平均(補間なし)
+            gestures = np.unique(y_test) + 1
+            test_trial_alignment_maps_without_interp_1sec = []
+            for gesture in gestures:
+                z_list = []
+                trial_list = []
+                iterator = X_test_aligment[y_test==gesture-1, 0]
+                i = 0
+                for tmp_X_test_aligment in iterator[:]:
+                    z_list.append(tmp_X_test_aligment)
+                    i += 1
+                    if i == 19:  # トライアル数で分割
+                        trial_list.append(np.mean(np.array(z_list), axis=0))
+                        z_list = []
+                        i = 0
+                test_trial_alignment_maps_without_interp_1sec.append(trial_list)
+
+            #-----------------------------------------
+            # 位置合わせ
+            #-----------------------------------------
+            accuracy_each_position = []
+            accuracy_each_position_normal = []
+            for gesture in range(1,8):
+                accuracy_each_gesture_alignment = []
+                for trial in range(1,6):
+                    start_alignment = time.time() # 時間計測開始
+                    scalar = MinMaxScaler()
+                    img_ref = (scalar.fit_transform(train_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].reshape(-1,1)).reshape(train_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].shape)*255).astype(np.float32)
+                    img_test = (scalar.fit_transform(test_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].reshape(-1,1)).reshape(test_trial_alignment_maps_without_interp_1sec[gesture-1][trial*3-1].shape)*255).astype(np.float32)
+
+                    if 1 ==1:
+                    # try:
+                        # 初期値：単位行列（≒剛体）
+                        init = [1, 0, 0, 1, 0, 0]
+
+                        res = minimize(
+                            objective_ncc,
+                            x0=init,
+                            args=(img_test, img_ref),
+                            method="Powell"
+                        )
+
+                        a, b, c, d, tx, ty = res.x
+
+                        theta_rad = np.arctan2(c, a)
+                        theta_deg = np.degrees(theta_rad)
+                        sx = np.sqrt(a**2 + c**2)
+                        sy = np.sqrt(b**2 + d**2)
+                        shear = (a*b + c*d) / (sx*sy)
+
+                        end_alignment = time.time()
+                        time_alignment_list.append(end_alignment - start_alignment)
+                            
+
+                        # ==============推論フェーズ=============#
+                        # 推論用特徴量マップ抽出
+                        tx = -tx  # mm→チャネル単位
+                        ty = -ty  # mm→チャネル単位
+                        theta = theta_rad #theta_rad  # degree
+                        sx = sx
+                        sy = sy
+                        shear = shear
+                        # ==============推論フェーズ=============#
+                        j = 0
+                        for i, (emg_test_8x8, label) in enumerate(zip(emg_list_test, y_list_test)):
+                            # 位置合わせに使用したtrialは無視
+                            if (i+1) % 5 == trial:
+                                continue
+                            tmp_X = warp_batch_images(emg_test_8x8, tx, ty, theta, sx, sy, shear)
+                            tmp_X = segment_time_series(tmp_X, window=window, hop=hop)  # (n_windows, window, 8, 8)
+
+                            # ========= チャネルごとに正規化 =========
+                            mean = np.mean(tmp_X.reshape(-1,ch_size,ch_size), axis=0)
+                            std = np.std(tmp_X.reshape(-1,ch_size,ch_size), axis=0) + 1e-8
+                            tmp_X = (tmp_X - mean.reshape(1, 1, ch_size, ch_size)) / std.reshape(1, 1, ch_size, ch_size)
+                            # ====================================
+
+                            # tmp_X = tmp_X.reshape(tmp_X.shape[0], tmp_X.shape[1], 36)  # (n_windows, window, 36) #
+
+                            # 特徴量抽出
+                            ptp = [ptp_feat(x) for x in tmp_X]
+                            rms = [rms_feat(x) for x in tmp_X]
+                            wl = [waveform_length(x) for x in tmp_X]
+                            zc = [zero_crossings(x, threshold) for x in tmp_X]
+                            ssc = [slope_sign_changes(x, threshold) for x in tmp_X]
+                            wamp = [wamp_feat(x, threshold2) for x in tmp_X]
+                            td_psd = [td_psd_multichannel(x, fs=fs, mode="vector") for x in tmp_X]
+                            td_psd = np.array(td_psd)
+                            f1 = td_psd[:,:,0].reshape(-1,ch_size,ch_size)
+                            f2 = td_psd[:,:,1].reshape(-1,ch_size,ch_size)
+                            f3 = td_psd[:,:,2].reshape(-1,ch_size,ch_size)
+                            f4 = td_psd[:,:,3].reshape(-1,ch_size,ch_size)
+                            f5 = td_psd[:,:,4].reshape(-1,ch_size,ch_size)
+                            f6 = td_psd[:,:,5].reshape(-1,ch_size,ch_size)
+                            # td_psd = td_psd.reshape(td_psd.shape[0], -1)
+                            # tmp_X = medianfilter_and_hstack([wl, f1, f6], kernel_size=2, shape=6)
+                            # tmp_X = np.hstack([rms, wl, zc]) # tmp_X = np.hstack([rms, wl, zc, ssc]) #
+                            # tmp_X = rms
+                            # tmp_X = np.stack([rms, wl, zc], axis=1)
+                            # tmp_X = np.stack([wl, rms, zc], axis=1)
+                            tmp_X = wl
+                            # tmp_X = extract_features(emg_test_8x8, FeatureSpec(kind=kind, window=window, hop=hop))  # (n_windows, 36)
+                            n_windows = len(tmp_X)
+                            # 例：ダミーの 3 クラスを周回（実際はジェスチャーIDに差し替え）
+                            tmp_y = [int(label)-1 for i in range(n_windows)]
+                            sizes_te.append(n_windows)
+
+                            if len(tmp_y) != len(tmp_X):
+                                raise ValueError(f"y_test length ({len(tmp_y)}) must match number of windows ({len(tmp_X)})")
+                            
+                            if j == 0:
+                                X_test = tmp_X
+                                y_test = tmp_y
+                            else:
+                                X_test = np.vstack([X_test, tmp_X])
+                                y_test = np.hstack([y_test, tmp_y])
+                            
+                            j += 1
+
+                        # 推論
+                        X_test_nonclopped = X_test.reshape(-1, 8*8)
+                        y_pred = clf.predict(X_test_nonclopped)
+                        proba = clf.predict_proba(X_test_nonclopped)
+                        score = clf.score(X_test_nonclopped, y_test)
+                        accuracy_each_gesture_alignment.append(score)
+                        accuracy_each_position.append(score)
+                        accracy_all.append(score)
+
+                        all_results_data.append({
+                            "Subject": subject,
+                            "Method": "Align+LDA",
+                            "Position": electrode_place,
+                            "Fold": trial-1,
+                            "Accuracy": score
+                        })
+                    # except:
+                    #     print(f"電極配置: {electrode_place}, ジェスチャ: {gesture}, trial1: {trial1}, trial2: {trial2} でエラー")
+                print(f'accuracy of gesture{gesture}: {np.mean(accuracy_each_gesture_alignment)}')
+            print(f'accuracy of {electrode_place}: {np.mean(accuracy_each_position)}')
+        print(f'accracy_all: {np.mean(accracy_all)}')
+        print(f'average time for alignment: {np.mean(time_alignment_list)} sec')
+    # ### 修正点4: CSV出力 ###
+    print("\n" + "="*40)
+    print("Saving results to 'align_lda_results.csv'...")
+    df_results = pd.DataFrame(all_results_data)
+    df_results.to_csv("align_lda_results.csv", index=False)
+    print("Done.")
